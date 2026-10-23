@@ -1,8 +1,9 @@
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import (
+    AliasPath,
     BaseModel,
     ConfigDict,
     EmailStr,
@@ -11,7 +12,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.enums import AttendanceStatus, UserRole
+from app.enums import AttendanceStatus, SportsLevel, UserRole
 
 StudentName = Annotated[
     str, StringConstraints(min_length=1, max_length=100, strip_whitespace=True)
@@ -53,12 +54,18 @@ class CourseCreate(BaseModel):
     code: CourseCode
     title: CourseTitle
     description: str | None = Field(default=None, max_length=500)
+    course_fee: Decimal | None = Field(
+        default=None, gt=0, max_digits=10, decimal_places=2
+    )
 
 
 class CourseUpdate(BaseModel):
     code: CourseCode | None = None
     title: CourseTitle | None = None
     description: str | None = Field(default=None, max_length=500)
+    course_fee: Decimal | None = Field(
+        default=None, gt=0, max_digits=10, decimal_places=2
+    )
 
 
 class CourseRead(CourseCreate):
@@ -176,6 +183,180 @@ class MarkRead(MarkCreate):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+SportName = Annotated[
+    str, StringConstraints(min_length=1, max_length=100, strip_whitespace=True)
+]
+EventName = Annotated[
+    str, StringConstraints(min_length=1, max_length=100, strip_whitespace=True)
+]
+CompetitionName = Annotated[
+    str, StringConstraints(min_length=1, max_length=150, strip_whitespace=True)
+]
+AchievementResult = Annotated[
+    str, StringConstraints(min_length=1, max_length=100, strip_whitespace=True)
+]
+NoticeTitle = Annotated[
+    str, StringConstraints(min_length=1, max_length=150, strip_whitespace=True)
+]
+NoticeDescription = Annotated[
+    str, StringConstraints(min_length=1, max_length=2000, strip_whitespace=True)
+]
+TimetableWeekday = Literal[
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
+]
+ClassroomNumber = Annotated[
+    str, StringConstraints(min_length=1, max_length=50, strip_whitespace=True)
+]
+PaymentMethod = Literal["cash", "card", "upi", "bank_transfer"]
+
+
+class FeeAssignmentCreate(BaseModel):
+    student_id: int = Field(gt=0)
+    course_id: int = Field(gt=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class FeePaymentCreate(BaseModel):
+    amount: Decimal = Field(gt=0, max_digits=10, decimal_places=2)
+    payment_date: date
+    payment_method: PaymentMethod
+
+
+class FeePaymentRead(FeePaymentCreate):
+    id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FeeAssignmentRead(BaseModel):
+    id: int
+    student_id: int
+    course_id: int
+    student_name: str
+    course_code: str
+    course_title: str
+    total_fee: Decimal
+    paid_fee: Decimal
+    pending_fee: Decimal
+    status: Literal["Paid", "Partial", "Pending"]
+    payments: list[FeePaymentRead]
+
+
+class TimetableEntryCreate(BaseModel):
+    course_id: int = Field(gt=0)
+    weekday: TimetableWeekday
+    start_time: time
+    end_time: time
+    classroom_number: ClassroomNumber
+
+    @model_validator(mode="after")
+    def end_time_after_start_time(self) -> "TimetableEntryCreate":
+        if self.end_time <= self.start_time:
+            raise ValueError("end_time must be later than start_time")
+        return self
+
+
+class TimetableEntryUpdate(BaseModel):
+    course_id: int | None = Field(default=None, gt=0)
+    weekday: TimetableWeekday | None = None
+    start_time: time | None = None
+    end_time: time | None = None
+    classroom_number: ClassroomNumber | None = None
+
+    @model_validator(mode="after")
+    def end_time_after_start_time(self) -> "TimetableEntryUpdate":
+        if (
+            self.start_time is not None
+            and self.end_time is not None
+            and self.end_time <= self.start_time
+        ):
+            raise ValueError("end_time must be later than start_time")
+        return self
+
+
+class TimetableEntryRead(TimetableEntryCreate):
+    id: int
+    course_code: str = Field(validation_alias=AliasPath("course", "code"))
+    course_title: str = Field(validation_alias=AliasPath("course", "title"))
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class NoticeCreate(BaseModel):
+    title: NoticeTitle
+    description: NoticeDescription
+    notice_date: date
+
+
+class NoticeUpdate(BaseModel):
+    title: NoticeTitle | None = None
+    description: NoticeDescription | None = None
+    notice_date: date | None = None
+
+
+class NoticeRead(NoticeCreate):
+    id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SportsAchievementCreate(BaseModel):
+    student_id: int = Field(gt=0)
+    sport_name: SportName
+    level: SportsLevel
+    event_name: EventName | None = None
+    competition_name: CompetitionName | None = None
+    achievement_date: date
+    result: AchievementResult | None = None
+
+
+class SportsAchievementUpdate(BaseModel):
+    sport_name: SportName | None = None
+    level: SportsLevel | None = None
+    event_name: EventName | None = None
+    competition_name: CompetitionName | None = None
+    achievement_date: date | None = None
+    result: AchievementResult | None = None
+
+
+class SportsAchievementRead(SportsAchievementCreate):
+    id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SportsSportSummary(BaseModel):
+    sport_name: str
+    athlete_count: int
+    achievement_count: int
+
+
+class SportsRecentAchievement(BaseModel):
+    id: int
+    student_id: int
+    student_name: str
+    sport_name: str
+    level: SportsLevel
+    event_name: str | None
+    competition_name: str | None
+    achievement_date: date
+    result: str | None
+
+
+class SportsDashboard(BaseModel):
+    total_athletes: int
+    total_achievements: int
+    district_athletes: int
+    state_athletes: int
+    national_athletes: int
+    district_achievements: int
+    state_achievements: int
+    national_achievements: int
+    sport_breakdown: list[SportsSportSummary]
+    recent_achievements: list[SportsRecentAchievement]
 
 
 class CourseResult(BaseModel):

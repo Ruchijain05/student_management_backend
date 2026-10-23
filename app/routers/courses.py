@@ -3,10 +3,10 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.database import get_db
-from app.models import Course
+from app.models import Course, FeeAssignment
 from app.schemas import CourseCreate, CourseRead, CourseUpdate
 from app.security import AdminUser, CurrentUser
 
@@ -82,6 +82,32 @@ def update_course(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="code and title cannot be null",
         )
+    if "course_fee" in changes:
+        assignments = db.scalars(
+            select(FeeAssignment)
+            .options(selectinload(FeeAssignment.payments))
+            .where(FeeAssignment.course_id == course_id)
+        ).all()
+        if changes["course_fee"] is None and assignments:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="A course fee cannot be cleared while student fee assignments exist",
+            )
+        if changes["course_fee"] is not None:
+            for assignment in assignments:
+                paid_fee = sum(
+                    (payment.amount for payment in assignment.payments),
+                    start=0,
+                )
+                if changes["course_fee"] < paid_fee:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail=(
+                            "Course fee cannot be less than payments already "
+                            "recorded for an enrolled student"
+                        ),
+                    )
+                assignment.total_fee = changes["course_fee"]
     for field, value in changes.items():
         setattr(course, field, value)
     try:

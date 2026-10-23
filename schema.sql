@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS courses (
     code VARCHAR(20) NOT NULL,
     title VARCHAR(150) NOT NULL,
     description VARCHAR(500) NULL,
+    course_fee DECIMAL(10, 2) NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uq_courses_code (code)
 ) ENGINE=InnoDB;
@@ -101,4 +102,80 @@ CREATE TABLE IF NOT EXISTS marks (
         FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE,
     CONSTRAINT fk_marks_course
         FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS sports_achievements (
+    id INT NOT NULL AUTO_INCREMENT,
+    student_id INT NOT NULL,
+    sport_name VARCHAR(100) NOT NULL,
+    level VARCHAR(10) NOT NULL,
+    event_name VARCHAR(100) NULL,
+    competition_name VARCHAR(150) NULL,
+    achievement_date DATE NOT NULL,
+    result VARCHAR(100) NULL,
+    PRIMARY KEY (id),
+    KEY ix_sports_achievements_student_id (student_id),
+    CONSTRAINT ck_sports_achievements_level
+        CHECK (level IN ('district', 'state', 'national')),
+    CONSTRAINT fk_sports_achievements_student
+        FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS notices (
+    id INT NOT NULL AUTO_INCREMENT,
+    title VARCHAR(150) NOT NULL,
+    description VARCHAR(2000) NOT NULL,
+    notice_date DATE NOT NULL,
+    PRIMARY KEY (id),
+    KEY ix_notices_notice_date (notice_date)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS course_timetable_entries (
+    id INT NOT NULL AUTO_INCREMENT,
+    course_id INT NOT NULL,
+    weekday VARCHAR(9) NOT NULL,
+    start_time TIME NOT NULL,
+    end_time TIME NOT NULL,
+    classroom_number VARCHAR(50) NOT NULL,
+    PRIMARY KEY (id),
+    KEY ix_course_timetable_entries_course_id (course_id),
+    CONSTRAINT ck_course_timetable_weekday
+        CHECK (weekday IN ('Monday', 'Tuesday', 'Wednesday', 'Thursday',
+                           'Friday', 'Saturday')),
+    CONSTRAINT ck_course_timetable_time_range
+        CHECK (end_time > start_time),
+    CONSTRAINT fk_course_timetable_entries_course
+        FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS fee_assignments (
+    id INT NOT NULL AUTO_INCREMENT,
+    student_id INT NOT NULL,
+    course_id INT NOT NULL,
+    total_fee DECIMAL(10, 2) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_fee_assignment_student_course (student_id, course_id),
+    KEY ix_fee_assignments_student_id (student_id),
+    KEY ix_fee_assignments_course_id (course_id),
+    CONSTRAINT ck_fee_assignment_total_positive CHECK (total_fee > 0),
+    CONSTRAINT fk_fee_assignments_student
+        FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE,
+    CONSTRAINT fk_fee_assignments_course
+        FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS fee_payments (
+    id INT NOT NULL AUTO_INCREMENT,
+    fee_assignment_id INT NOT NULL,
+    amount DECIMAL(10, 2) NOT NULL,
+    payment_date DATE NOT NULL,
+    payment_method VARCHAR(20) NOT NULL,
+    PRIMARY KEY (id),
+    KEY ix_fee_payments_fee_assignment_id (fee_assignment_id),
+    CONSTRAINT ck_fee_payment_amount_positive CHECK (amount > 0),
+    CONSTRAINT ck_fee_payment_method
+        CHECK (payment_method IN ('cash', 'card', 'upi', 'bank_transfer')),
+    CONSTRAINT fk_fee_payments_assignment
+        FOREIGN KEY (fee_assignment_id)
+        REFERENCES fee_assignments (id) ON DELETE CASCADE
 ) ENGINE=InnoDB;

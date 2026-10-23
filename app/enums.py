@@ -11,3 +11,9 @@ class AttendanceStatus(str, Enum):
     ABSENT = "absent"
     LATE = "late"
     EXCUSED = "excused"
+
+
+class SportsLevel(str, Enum):
+    DISTRICT = "district"
+    STATE = "state"
+    NATIONAL = "national"

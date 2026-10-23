@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(default=60, ge=1, le=1440)
     app_env: Literal["development", "production"] = "production"
     password_reset_otp_console_enabled: bool = False
+    cors_origins: str = ""
 
     model_config = SettingsConfigDict(
         env_file=Path(__file__).resolve().parent.parent / ".env",

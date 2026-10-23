@@ -556,6 +556,65 @@ def test_resource_crud_and_missing_auth(client: TestClient) -> None:
     ).status_code == 204
 
 
+def test_course_fee_can_be_created_read_and_updated(client: TestClient) -> None:
+    admin_headers = login(client, "admin@example.com", "correct-horse-battery")
+    registration = client.post(
+        "/api/v1/auth/register",
+        json={
+            "first_name": "Fee",
+            "last_name": "Student",
+            "email": "course-fee-student@example.com",
+            "password": "246810",
+        },
+    )
+    assert registration.status_code == 201
+    student_headers = login(
+        client, "course-fee-student@example.com", "246810"
+    )
+    created = client.post(
+        "/api/v1/courses",
+        json={
+            "code": "FEE101",
+            "title": "Course with fee",
+            "course_fee": "12500.00",
+        },
+        headers=admin_headers,
+    )
+
+    assert created.status_code == 201
+    course_id = created.json()["id"]
+    assert created.json()["course_fee"] == "12500.00"
+    assert client.get(
+        f"/api/v1/courses/{course_id}", headers=student_headers
+    ).json()["course_fee"] == "12500.00"
+    assert client.get("/api/v1/courses", headers=student_headers).json()[0][
+        "course_fee"
+    ] == "12500.00"
+
+    updated = client.patch(
+        f"/api/v1/courses/{course_id}",
+        json={"course_fee": "15000.50"},
+        headers=admin_headers,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["course_fee"] == "15000.50"
+    assert client.patch(
+        f"/api/v1/courses/{course_id}",
+        json={"course_fee": "0"},
+        headers=admin_headers,
+    ).status_code == 422
+    assert client.patch(
+        f"/api/v1/courses/{course_id}",
+        json={"course_fee": "16000.123"},
+        headers=admin_headers,
+    ).status_code == 422
+    assert client.patch(
+        f"/api/v1/courses/{course_id}",
+        json={"course_fee": "17000"},
+        headers=student_headers,
+    ).status_code == 403
+
+
 def test_student_update_rejects_null_required_fields(client: TestClient) -> None:
     headers = login(client, "admin@example.com", "correct-horse-battery")
     student = client.post(
@@ -584,6 +643,543 @@ def test_student_update_rejects_null_required_fields(client: TestClient) -> None
     assert unchanged.json()["first_name"] == "Test"
     assert unchanged.json()["last_name"] == "Student"
     assert unchanged.json()["email"] == "patch@example.com"
+
+
+def test_sports_achievements_access_and_dashboard(client: TestClient) -> None:
+    registration = client.post(
+        "/api/v1/auth/register",
+        json={
+            "first_name": "Mira",
+            "last_name": "Athlete",
+            "email": "mira@example.com",
+            "password": "246810",
+        },
+    )
+    assert registration.status_code == 201
+    student_headers = login(client, "mira@example.com", "246810")
+    student_id = registration.json()["user"]["student_id"]
+    admin_headers = login(client, "admin@example.com", "correct-horse-battery")
+    other_student = client.post(
+        "/api/v1/students",
+        json={
+            "first_name": "Asha",
+            "last_name": "Runner",
+            "email": "asha@example.com",
+        },
+        headers=admin_headers,
+    )
+    assert other_student.status_code == 201
+    other_student_id = other_student.json()["id"]
+
+    def create_achievement(
+        linked_student_id: int, sport_name: str, level: str, result: str
+    ) -> dict:
+        response = client.post(
+            "/api/v1/sports",
+            json={
+                "student_id": linked_student_id,
+                "sport_name": sport_name,
+                "level": level,
+                "event_name": "100m",
+                "competition_name": "Annual Meet",
+                "achievement_date": str(date.today()),
+                "result": result,
+            },
+            headers=admin_headers,
+        )
+        assert response.status_code == 201
+        return response.json()
+
+    state_achievement = create_achievement(
+        student_id, "Athletics", "state", "Silver Medal"
+    )
+    assert state_achievement["result"] == "Silver Medal"
+    create_achievement(student_id, "Athletics", "national", "Finalist")
+    other_achievement = create_achievement(
+        other_student_id, "Swimming", "district", "Gold"
+    )
+
+    assert client.post(
+        "/api/v1/sports",
+        json={
+            "student_id": student_id,
+            "sport_name": "Tennis",
+            "level": "national",
+            "achievement_date": str(date.today()),
+        },
+        headers=student_headers,
+    ).status_code == 403
+    assert client.get("/api/v1/sports").status_code == 401
+    student_records = client.get(
+        f"/api/v1/sports?student_id={other_student_id}",
+        headers=student_headers,
+    )
+    assert student_records.status_code == 200
+    assert len(student_records.json()) == 2
+    assert {record["student_id"] for record in student_records.json()} == {
+        student_id
+    }
+    assert client.get(
+        f"/api/v1/sports/{other_achievement['id']}", headers=student_headers
+    ).status_code == 403
+    assert client.get(
+        "/api/v1/sports?level=state&sport_name=athletics",
+        headers=admin_headers,
+    ).json()[0]["id"] == state_achievement["id"]
+
+    dashboard = client.get(
+        "/api/v1/dashboard/sports", headers=admin_headers
+    )
+    assert dashboard.status_code == 200
+    data = dashboard.json()
+    assert data["total_athletes"] == 2
+    assert data["total_achievements"] == 3
+    assert data["district_athletes"] == 1
+    assert data["state_athletes"] == 1
+    assert data["national_athletes"] == 1
+    assert data["district_achievements"] == 1
+    assert data["state_achievements"] == 1
+    assert data["national_achievements"] == 1
+    athletics = next(
+        sport for sport in data["sport_breakdown"]
+        if sport["sport_name"] == "Athletics"
+    )
+    assert athletics == {
+        "sport_name": "Athletics",
+        "athlete_count": 1,
+        "achievement_count": 2,
+    }
+    assert data["recent_achievements"][0]["student_name"] == "Asha Runner"
+    assert client.get(
+        "/api/v1/dashboard/sports", headers=student_headers
+    ).status_code == 403
+
+    assert client.patch(
+        f"/api/v1/sports/{state_achievement['id']}",
+        json={"level": None},
+        headers=admin_headers,
+    ).status_code == 422
+    updated = client.patch(
+        f"/api/v1/sports/{state_achievement['id']}",
+        json={"result": "Gold Medal"},
+        headers=admin_headers,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["result"] == "Gold Medal"
+    assert client.delete(
+        f"/api/v1/sports/{state_achievement['id']}", headers=admin_headers
+    ).status_code == 204
+    assert client.post(
+        "/api/v1/sports",
+        json={
+            "student_id": 9999,
+            "sport_name": "Tennis",
+            "level": "national",
+            "achievement_date": str(date.today()),
+        },
+        headers=admin_headers,
+    ).status_code == 404
+
+
+def test_notice_board_admin_management_and_authenticated_read(
+    client: TestClient,
+) -> None:
+    admin_headers = login(client, "admin@example.com", "correct-horse-battery")
+    assert client.get("/api/v1/notices").status_code == 401
+
+    registration = client.post(
+        "/api/v1/auth/register",
+        json={
+            "first_name": "Nina",
+            "last_name": "Student",
+            "email": "nina@example.com",
+            "password": "246810",
+        },
+    )
+    assert registration.status_code == 201
+    student_headers = login(client, "nina@example.com", "246810")
+
+    first = client.post(
+        "/api/v1/notices",
+        json={
+            "title": "Library schedule",
+            "description": "The library closes at 5 PM.",
+            "notice_date": "2026-10-22",
+        },
+        headers=admin_headers,
+    )
+    second = client.post(
+        "/api/v1/notices",
+        json={
+            "title": "Sports day",
+            "description": "Annual sports day is on Friday.",
+            "notice_date": "2026-10-23",
+        },
+        headers=admin_headers,
+    )
+    assert first.status_code == second.status_code == 201
+    assert second.json()["notice_date"] == "2026-10-23"
+
+    listed = client.get("/api/v1/notices?limit=1", headers=student_headers)
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+    assert listed.json()[0]["title"] == "Sports day"
+    assert client.post(
+        "/api/v1/notices",
+        json={
+            "title": "Student notice",
+            "description": "Students cannot publish notices.",
+            "notice_date": "2026-10-24",
+        },
+        headers=student_headers,
+    ).status_code == 403
+
+    updated = client.patch(
+        f"/api/v1/notices/{first.json()['id']}",
+        json={"title": "Updated library schedule"},
+        headers=admin_headers,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["title"] == "Updated library schedule"
+    assert client.patch(
+        f"/api/v1/notices/{first.json()['id']}",
+        json={"notice_date": None},
+        headers=admin_headers,
+    ).status_code == 422
+    assert client.delete(
+        f"/api/v1/notices/{first.json()['id']}", headers=student_headers
+    ).status_code == 403
+    assert client.delete(
+        f"/api/v1/notices/{first.json()['id']}", headers=admin_headers
+    ).status_code == 204
+    assert client.get(
+        f"/api/v1/notices/{first.json()['id']}", headers=admin_headers
+    ).status_code == 404
+
+
+def test_course_timetable_admin_management_and_enrolled_student_visibility(
+    client: TestClient,
+) -> None:
+    admin_headers = login(client, "admin@example.com", "correct-horse-battery")
+    assert client.get("/api/v1/timetable").status_code == 401
+
+    student_registration = client.post(
+        "/api/v1/auth/register",
+        json={
+            "first_name": "Tara",
+            "last_name": "Student",
+            "email": "tara@example.com",
+            "password": "246810",
+        },
+    )
+    other_registration = client.post(
+        "/api/v1/auth/register",
+        json={
+            "first_name": "Omar",
+            "last_name": "Student",
+            "email": "omar@example.com",
+            "password": "135790",
+        },
+    )
+    assert student_registration.status_code == other_registration.status_code == 201
+    student_id = student_registration.json()["user"]["student_id"]
+    other_student_id = other_registration.json()["user"]["student_id"]
+    student_headers = login(client, "tara@example.com", "246810")
+
+    math_course = client.post(
+        "/api/v1/courses",
+        json={"code": "MATH101", "title": "Mathematics"},
+        headers=admin_headers,
+    )
+    physics_course = client.post(
+        "/api/v1/courses",
+        json={"code": "PHYS101", "title": "Physics"},
+        headers=admin_headers,
+    )
+    assert math_course.status_code == physics_course.status_code == 201
+    math_course_id = math_course.json()["id"]
+    physics_course_id = physics_course.json()["id"]
+    assert client.post(
+        "/api/v1/enrollments",
+        json={"student_id": student_id, "course_id": math_course_id},
+        headers=admin_headers,
+    ).status_code == 201
+    assert client.post(
+        "/api/v1/enrollments",
+        json={"student_id": other_student_id, "course_id": physics_course_id},
+        headers=admin_headers,
+    ).status_code == 201
+    assert client.post(
+        "/api/v1/enrollments",
+        json={"student_id": other_student_id, "course_id": math_course_id},
+        headers=admin_headers,
+    ).status_code == 201
+
+    monday_entry = {
+        "course_id": math_course_id,
+        "weekday": "Monday",
+        "start_time": "09:00",
+        "end_time": "10:00",
+        "classroom_number": "Room 204",
+    }
+    created = client.post(
+        "/api/v1/timetable", json=monday_entry, headers=admin_headers
+    )
+    tuesday = client.post(
+        "/api/v1/timetable",
+        json={
+            **monday_entry,
+            "course_id": physics_course_id,
+            "weekday": "Tuesday",
+            "start_time": "10:00",
+            "end_time": "11:00",
+        },
+        headers=admin_headers,
+    )
+    other_entry = tuesday
+    assert created.status_code == tuesday.status_code == 201
+    assert created.json()["classroom_number"] == "Room 204"
+    assert created.json()["start_time"].startswith("09:00")
+    assert created.json()["course_title"] == "Mathematics"
+
+    overlapping = client.post(
+        "/api/v1/timetable",
+        json={
+            **monday_entry,
+            "start_time": "09:45",
+            "end_time": "10:30",
+        },
+        headers=admin_headers,
+    )
+    assert overlapping.status_code == 409
+    assert client.post(
+        "/api/v1/timetable",
+        json={**monday_entry, "course_id": 9999},
+        headers=admin_headers,
+    ).status_code == 404
+    assert client.post(
+        "/api/v1/timetable",
+        json={**monday_entry, "weekday": "Sunday"},
+        headers=admin_headers,
+    ).status_code == 422
+    assert client.post(
+        "/api/v1/timetable",
+        json={**monday_entry, "end_time": "08:00"},
+        headers=admin_headers,
+    ).status_code == 422
+    assert client.post(
+        "/api/v1/timetable", json=monday_entry, headers=student_headers
+    ).status_code == 403
+
+    student_schedule = client.get(
+        "/api/v1/timetable?limit=200", headers=student_headers
+    )
+    assert student_schedule.status_code == 200
+    assert [entry["weekday"] for entry in student_schedule.json()] == ["Monday"]
+    other_student_headers = login(client, "omar@example.com", "135790")
+    other_student_schedule = client.get(
+        "/api/v1/timetable?limit=200", headers=other_student_headers
+    )
+    assert [entry["weekday"] for entry in other_student_schedule.json()] == [
+        "Monday",
+        "Tuesday",
+    ]
+    assert client.get(
+        f"/api/v1/timetable/{other_entry.json()['id']}", headers=student_headers
+    ).status_code == 404
+
+    updated = client.patch(
+        f"/api/v1/timetable/{created.json()['id']}",
+        json={"classroom_number": "Room 205"},
+        headers=admin_headers,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["classroom_number"] == "Room 205"
+    assert client.delete(
+        f"/api/v1/timetable/{created.json()['id']}", headers=student_headers
+    ).status_code == 403
+    assert client.delete(
+        f"/api/v1/timetable/{created.json()['id']}", headers=admin_headers
+    ).status_code == 204
+
+
+def test_fee_assignments_payments_totals_and_student_access(
+    client: TestClient,
+) -> None:
+    admin_headers = login(client, "admin@example.com", "correct-horse-battery")
+    assert client.get("/api/v1/fees").status_code == 401
+
+    registration = client.post(
+        "/api/v1/auth/register",
+        json={
+            "first_name": "Maya",
+            "last_name": "Student",
+            "email": "maya-fees@example.com",
+            "password": "246810",
+        },
+    )
+    assert registration.status_code == 201
+    student_id = registration.json()["user"]["student_id"]
+    student_headers = login(client, "maya-fees@example.com", "246810")
+    other_registration = client.post(
+        "/api/v1/auth/register",
+        json={
+            "first_name": "Noah",
+            "last_name": "Student",
+            "email": "noah-fees@example.com",
+            "password": "135790",
+        },
+    )
+    assert other_registration.status_code == 201
+    other_headers = login(client, "noah-fees@example.com", "135790")
+
+    course = client.post(
+        "/api/v1/courses",
+        json={
+            "code": "FEE101",
+            "title": "Fee Test Course",
+            "course_fee": "1200.00",
+        },
+        headers=admin_headers,
+    )
+    course_id = course.json()["id"]
+    assert client.post(
+        "/api/v1/enrollments",
+        json={"student_id": student_id, "course_id": course_id},
+        headers=admin_headers,
+    ).status_code == 201
+
+    fee = client.post(
+        "/api/v1/fees",
+        json={"student_id": student_id, "course_id": course_id},
+        headers=admin_headers,
+    )
+    assert fee.status_code == 201
+    fee_data = fee.json()
+    assert fee_data["total_fee"] == "1200.00"
+    assert fee_data["paid_fee"] == "0.00"
+    assert fee_data["pending_fee"] == "1200.00"
+    assert fee_data["status"] == "Pending"
+    assert fee_data["student_name"] == "Maya Student"
+    assert client.post(
+        "/api/v1/fees",
+        json={"student_id": student_id, "course_id": course_id},
+        headers=admin_headers,
+    ).status_code == 409
+    assert client.post(
+        "/api/v1/fees",
+        json={"student_id": student_id, "course_id": 9999},
+        headers=admin_headers,
+    ).status_code == 404
+    assert client.post(
+        "/api/v1/fees",
+        json={
+            "student_id": student_id,
+            "course_id": course_id,
+            "total_fee": "0",
+        },
+        headers=admin_headers,
+    ).status_code == 422
+    assert client.post(
+        "/api/v1/fees",
+        json={
+            "student_id": other_registration.json()["user"]["student_id"],
+            "course_id": course_id,
+        },
+        headers=admin_headers,
+    ).status_code == 422
+
+    no_fee_course = client.post(
+        "/api/v1/courses",
+        json={"code": "FEE102", "title": "Course without a catalog fee"},
+        headers=admin_headers,
+    ).json()
+    assert client.post(
+        "/api/v1/enrollments",
+        json={"student_id": student_id, "course_id": no_fee_course["id"]},
+        headers=admin_headers,
+    ).status_code == 201
+    assert client.post(
+        "/api/v1/fees",
+        json={"student_id": student_id, "course_id": no_fee_course["id"]},
+        headers=admin_headers,
+    ).status_code == 422
+
+    assert client.post(
+        f"/api/v1/fees/{fee_data['id']}/payments",
+        json={
+            "amount": "500",
+            "payment_date": "2026-10-23",
+            "payment_method": "upi",
+        },
+        headers=student_headers,
+    ).status_code == 403
+
+    first_payment = client.post(
+        f"/api/v1/fees/{fee_data['id']}/payments",
+        json={
+            "amount": "500.00",
+            "payment_date": "2026-10-22",
+            "payment_method": "upi",
+        },
+        headers=admin_headers,
+    )
+    assert first_payment.status_code == 201
+    partial = client.get(
+        "/api/v1/fees", headers=student_headers
+    ).json()[0]
+    assert partial["paid_fee"] == "500.00"
+    assert partial["pending_fee"] == "700.00"
+    assert partial["status"] == "Partial"
+    assert partial["payments"][0]["payment_method"] == "upi"
+    assert client.get("/api/v1/fees", headers=other_headers).json() == []
+
+    updated_course = client.patch(
+        f"/api/v1/courses/{course_id}",
+        json={"course_fee": "1300.00"},
+        headers=admin_headers,
+    )
+    assert updated_course.status_code == 200
+    partial_after_course_edit = client.get(
+        "/api/v1/fees", headers=student_headers
+    ).json()[0]
+    assert partial_after_course_edit["total_fee"] == "1300.00"
+    assert partial_after_course_edit["pending_fee"] == "800.00"
+    assert client.patch(
+        f"/api/v1/courses/{course_id}",
+        json={"course_fee": "499.99"},
+        headers=admin_headers,
+    ).status_code == 422
+    assert client.patch(
+        f"/api/v1/fees/{fee_data['id']}",
+        json={"total_fee": "1500.00"},
+        headers=admin_headers,
+    ).status_code == 405
+
+    assert client.post(
+        f"/api/v1/fees/{fee_data['id']}/payments",
+        json={
+            "amount": "800.01",
+            "payment_date": "2026-10-23",
+            "payment_method": "cash",
+        },
+        headers=admin_headers,
+    ).status_code == 422
+    final_payment = client.post(
+        f"/api/v1/fees/{fee_data['id']}/payments",
+        json={
+            "amount": "800.00",
+            "payment_date": "2026-10-23",
+            "payment_method": "bank_transfer",
+        },
+        headers=admin_headers,
+    )
+    assert final_payment.status_code == 201
+    paid = client.get("/api/v1/fees", headers=student_headers).json()[0]
+    assert paid["total_fee"] == paid["paid_fee"] == "1300.00"
+    assert paid["pending_fee"] == "0.00"
+    assert paid["status"] == "Paid"
+    assert len(paid["payments"]) == 2
 
 
 def test_registration_never_grants_admin_and_rejects_bad_login(
