@@ -6,8 +6,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.department_access import department_student_ids
+from app.teacher_access import teacher_student_ids
 from app.enums import UserRole
-from app.models import Student, User
+from app.models import FeeAssignment, Student, User
 from app.schemas import StudentCreate, StudentRead, StudentUpdate
 from app.security import AdminUser, CurrentUser
 
@@ -67,6 +69,10 @@ def list_students(
         if current_user.student_id is None:
             return []
         statement = statement.where(Student.id == current_user.student_id)
+    elif current_user.role == UserRole.HOD:
+        statement = statement.where(Student.id.in_(department_student_ids(current_user)))
+    elif current_user.role == UserRole.TEACHER:
+        statement = statement.where(Student.id.in_(teacher_student_ids(current_user)))
     if q and q.strip():
         search = f"%{q.strip()}%"
         statement = statement.where(
@@ -86,6 +92,30 @@ def read_student(
 ) -> Student:
     student = get_student_or_404(student_id, db)
     ensure_student_access(student, current_user)
+    if (
+        current_user.role == UserRole.HOD
+        and db.scalar(
+            select(Student.id)
+            .where(
+                Student.id == student_id,
+                Student.id.in_(department_student_ids(current_user)),
+            )
+        )
+        is None
+    ):
+        raise HTTPException(status_code=404, detail="Student not found")
+    if (
+        current_user.role == UserRole.TEACHER
+        and db.scalar(
+            select(Student.id)
+            .where(
+                Student.id == student_id,
+                Student.id.in_(teacher_student_ids(current_user)),
+            )
+        )
+        is None
+    ):
+        raise HTTPException(status_code=404, detail="Student not found")
     return student
 
 
@@ -135,5 +165,27 @@ def update_student(
 @router.delete("/{student_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_student(student_id: int, db: DatabaseSession, _: AdminUser) -> None:
     student = get_student_or_404(student_id, db)
+    if db.scalar(
+        select(FeeAssignment.id)
+        .where(FeeAssignment.student_id == student_id)
+        .limit(1)
+    ) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Cannot delete this student because fee assignments or payment "
+                "history exist. Preserve the financial records by keeping this student."
+            ),
+        )
     db.delete(student)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Cannot delete this student because related financial records "
+                "exist. Preserve the financial records by keeping this student."
+            ),
+        ) from exc

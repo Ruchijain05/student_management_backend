@@ -6,6 +6,8 @@ from sqlalchemy import case, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
+from app.department_access import department_course_ids, ensure_course_in_department
+from app.teacher_access import ensure_teacher_course, teacher_course_ids
 from app.enums import UserRole
 from app.models import Course, CourseTimetableEntry, Enrollment, User
 from app.schemas import (
@@ -54,6 +56,10 @@ def ensure_entry_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Timetable entry not found",
         )
+    if user.role == UserRole.HOD:
+        ensure_course_in_department(entry.course_id, user, db)
+    if user.role == UserRole.TEACHER:
+        ensure_teacher_course(entry.course_id, user, db)
 
 
 def ensure_no_overlap(
@@ -127,6 +133,14 @@ def list_timetable_entries(
                 Enrollment.course_id == CourseTimetableEntry.course_id,
             )
             .where(Enrollment.student_id == current_user.student_id)
+        )
+    elif current_user.role == UserRole.HOD:
+        statement = statement.where(
+            CourseTimetableEntry.course_id.in_(department_course_ids(current_user))
+        )
+    elif current_user.role == UserRole.TEACHER:
+        statement = statement.where(
+            CourseTimetableEntry.course_id.in_(teacher_course_ids(current_user))
         )
     elif course_id is not None:
         statement = statement.where(

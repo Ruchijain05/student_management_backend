@@ -8,6 +8,12 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.academic import ensure_student_enrolled
+from app.department_access import department_course_ids, ensure_course_in_department
+from app.teacher_access import (
+    ensure_course_student_enrolled,
+    ensure_teacher_course,
+    teacher_course_ids,
+)
 from app.enums import UserRole
 from app.models import Attendance, User
 from app.schemas import AttendanceCreate, AttendanceRead, AttendanceUpdate
@@ -27,20 +33,31 @@ def get_record_or_404(record_id: int, db: Session) -> Attendance:
     return record
 
 
-def ensure_attendance_access(record: Attendance, user: User) -> None:
+def ensure_attendance_access(record: Attendance, user: User, db: Session) -> None:
     if user.role == UserRole.STUDENT and user.student_id != record.student_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not your attendance record",
         )
+    if user.role == UserRole.HOD:
+        ensure_course_in_department(record.course_id, user, db)
+    if user.role == UserRole.TEACHER:
+        ensure_teacher_course(record.course_id, user, db)
 
 
 @router.post("", response_model=AttendanceRead, status_code=status.HTTP_201_CREATED)
 def create_attendance(
     attendance_data: AttendanceCreate,
     db: DatabaseSession,
-    _: AdminUser,
+    current_user: CurrentUser,
 ) -> Attendance:
+    if current_user.role == UserRole.TEACHER:
+        ensure_teacher_course(attendance_data.course_id, current_user, db)
+        ensure_course_student_enrolled(
+            attendance_data.course_id, attendance_data.student_id, db
+        )
+    elif current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin or assigned teacher required")
     ensure_student_enrolled(
         attendance_data.student_id, attendance_data.course_id, db
     )
@@ -73,6 +90,12 @@ def list_attendance(
         if current_user.student_id is None:
             return []
         statement = statement.where(Attendance.student_id == current_user.student_id)
+    elif current_user.role == UserRole.HOD:
+        statement = statement.where(
+            Attendance.course_id.in_(department_course_ids(current_user))
+        )
+    elif current_user.role == UserRole.TEACHER:
+        statement = statement.where(Attendance.course_id.in_(teacher_course_ids(current_user)))
     elif student_id is not None:
         statement = statement.where(Attendance.student_id == student_id)
     if course_id is not None:
@@ -92,7 +115,7 @@ def read_attendance(
     record_id: int, db: DatabaseSession, current_user: CurrentUser
 ) -> Attendance:
     record = get_record_or_404(record_id, db)
-    ensure_attendance_access(record, current_user)
+    ensure_attendance_access(record, current_user, db)
     return record
 
 
@@ -101,9 +124,13 @@ def update_attendance(
     record_id: int,
     attendance_data: AttendanceUpdate,
     db: DatabaseSession,
-    _: AdminUser,
+    current_user: CurrentUser,
 ) -> Attendance:
     record = get_record_or_404(record_id, db)
+    if current_user.role == UserRole.TEACHER:
+        ensure_teacher_course(record.course_id, current_user, db)
+    elif current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin or assigned teacher required")
     record.status = attendance_data.status
     db.commit()
     db.refresh(record)

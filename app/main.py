@@ -7,12 +7,14 @@ from app.routers import (
     auth,
     courses,
     dashboard,
+    departments,
     enrollments,
     fees,
     marks,
     notices,
     results,
     students,
+    teachers,
     sports,
     sports_dashboard,
     timetable,
@@ -48,6 +50,8 @@ app.include_router(attendance.router, prefix="/api/v1")
 app.include_router(marks.router, prefix="/api/v1")
 app.include_router(results.router, prefix="/api/v1")
 app.include_router(dashboard.router, prefix="/api/v1")
+app.include_router(departments.router, prefix="/api/v1")
+app.include_router(teachers.router, prefix="/api/v1")
 app.include_router(sports.router, prefix="/api/v1")
 app.include_router(sports_dashboard.router, prefix="/api/v1")
 app.include_router(notices.router, prefix="/api/v1")

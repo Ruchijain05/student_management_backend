@@ -1,6 +1,7 @@
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import (
     AliasPath,
@@ -57,6 +58,7 @@ class CourseCreate(BaseModel):
     course_fee: Decimal | None = Field(
         default=None, gt=0, max_digits=10, decimal_places=2
     )
+    department_id: int | None = Field(default=None, gt=0)
 
 
 class CourseUpdate(BaseModel):
@@ -66,6 +68,7 @@ class CourseUpdate(BaseModel):
     course_fee: Decimal | None = Field(
         default=None, gt=0, max_digits=10, decimal_places=2
     )
+    department_id: int | None = Field(default=None, gt=0)
 
 
 class CourseRead(CourseCreate):
@@ -107,6 +110,8 @@ class UserRead(BaseModel):
     email: EmailStr
     role: UserRole
     student_id: int | None
+    department_id: int | None = None
+    teacher_id: int | None = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -223,12 +228,21 @@ class FeePaymentCreate(BaseModel):
     amount: Decimal = Field(gt=0, max_digits=10, decimal_places=2)
     payment_date: date
     payment_method: PaymentMethod
+    idempotency_key: UUID
 
 
-class FeePaymentRead(FeePaymentCreate):
+class FeePaymentRead(BaseModel):
     id: int
+    amount: Decimal
+    payment_date: date
+    payment_method: PaymentMethod
+    idempotency_key: UUID | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class FeePaymentRecordResponse(FeePaymentRead):
+    replayed: bool = False
 
 
 class FeeAssignmentRead(BaseModel):
@@ -375,6 +389,79 @@ class AdminDashboard(BaseModel):
     total_enrollments: int
     attendance_records_today: int
     total_assessments: int
+
+
+class PrincipalDashboard(BaseModel):
+    total_students: int
+    total_courses: int
+    total_attendance: int
+    total_marks: int
+    total_results: int
+
+
+class DepartmentCreate(BaseModel):
+    name: Annotated[str, StringConstraints(min_length=1, max_length=150, strip_whitespace=True)]
+
+
+class DepartmentUpdate(BaseModel):
+    name: Annotated[str, StringConstraints(min_length=1, max_length=150, strip_whitespace=True)] | None = None
+
+
+class DepartmentRead(DepartmentCreate):
+    id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TeacherCreate(BaseModel):
+    name: Annotated[str, StringConstraints(min_length=1, max_length=200, strip_whitespace=True)]
+    email: EmailStr
+    department_id: int = Field(gt=0)
+
+
+class TeacherUpdate(BaseModel):
+    name: Annotated[str, StringConstraints(min_length=1, max_length=200, strip_whitespace=True)] | None = None
+    email: EmailStr | None = None
+    department_id: int | None = Field(default=None, gt=0)
+
+
+class TeacherRead(TeacherCreate):
+    id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TeacherCourseCreate(BaseModel):
+    course_id: int = Field(gt=0)
+
+
+class TeacherCourseRead(BaseModel):
+    id: int
+    teacher_id: int
+    course_id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class HODDashboard(BaseModel):
+    department_id: int
+    department_name: str
+    total_students: int
+    total_courses: int
+    total_teachers: int
+    total_enrollments: int
+    total_attendance: int
+    total_marks: int
+    total_results: int
+
+
+class TeacherDashboard(BaseModel):
+    total_courses: int
+    total_students: int
+    total_enrollments: int
+    total_attendance: int
+    total_marks: int
+    total_results: int
 
 
 class StudentDashboard(BaseModel):

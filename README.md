@@ -1,7 +1,7 @@
 # Student Management System API
 
 FastAPI application with MySQL persistence, SQLAlchemy ORM, Pydantic validation,
-JWT login, and admin/student access control.
+JWT login, and admin/principal/HOD/student access control.
 
 ## Project layout
 
@@ -10,6 +10,9 @@ app/
   routers/       API routes, grouped by feature
   config.py      Environment-based settings
   create_admin.py
+  create_principal.py
+  create_hod.py
+  create_teacher_account.py
   database.py    SQLAlchemy engine and session dependency
   enums.py       Role and attendance values
   main.py        FastAPI application and router registration
@@ -26,6 +29,11 @@ migration_v6.sql Historical migration for student-specific timetable entries
 migration_v7.sql Adds the course-wise timetable
 migration_v8.sql Adds course fee assignments and payment history
 migration_v9.sql Adds the optional catalog fee to courses
+migration_v10.sql Allows principal accounts in the users role constraint
+migration_v11.sql Adds departments, teachers, course mapping, and HOD accounts
+migration_v12.sql Adds teacher login linkage and the Teacher role
+migration_v13.sql Prevents parent deletes from cascading through fee records
+migration_v14.sql Adds idempotency keys for fee payments
 ```
 
 ## Installation and database setup
@@ -150,17 +158,130 @@ Apply this migration once after v8. Existing courses keep their records and
 have a null course fee until an admin sets one. Course fees must be positive
 amounts with at most two decimal places.
 
+For an existing database, allow Principal accounts with the role constraint
+migration:
+
+```powershell
+Get-Content .\student_management_system_backend\migration_v10.sql | mysql -u YOUR_MYSQL_USER -p
+```
+
+Run this migration once after v9. Fresh databases created from `schema.sql`
+already include the Principal role.
+
+### Add departments and HOD support
+
+For an existing database that has already applied `migration_v10.sql`, back it
+up and apply the additive HOD migration once:
+
+```powershell
+Get-Content .\student_management_system_backend\migration_v11.sql | mysql -u YOUR_MYSQL_USER -p
+```
+
+The migration creates departments and teachers, adds nullable department links
+to users and courses, and permits the `hod` role. Existing course and user
+records are preserved and remain unassigned (`department_id` stays `NULL`);
+the migration never guesses department assignments. Fresh databases created
+from `schema.sql` already include these additions.
+
+After migration, sign in as Admin and create departments in the Departments
+page. Assign legacy courses to the correct department by editing each course,
+then add teachers in the Teachers page. To provision each HOD with a secure
+password, run this from the repository root:
+
+```powershell
+Push-Location .\student_management_system_backend
+& .\.venv\Scripts\python.exe -m app.create_hod
+Pop-Location
+```
+
+The command interactively requests the HOD email, an existing Department ID,
+and a password twice; the password is hashed and is never placed in source
+code or printed. Department IDs are visible in the Admin Departments page or
+from `GET /api/v1/departments`. The HOD then logs in on the existing frontend
+login page with that email and password. The account opens the department
+dashboard and can only read records tied to that assigned department.
+
+### Add Teacher login and course access
+
+After applying `migration_v11.sql`, back up the database and apply the additive
+Teacher-role migration once:
+
+```powershell
+Get-Content .\student_management_system_backend\migration_v12.sql | mysql -u YOUR_MYSQL_USER -p
+```
+
+The migration adds a nullable, unique `users.teacher_id` link and allows the
+`teacher` role; existing accounts and roles remain unchanged. Fresh databases
+created from `schema.sql` already include the Teacher role and link.
+
+### Protect fee history from student and course deletion
+
+For an existing database that has fee assignments and has applied migration
+v12, back it up and apply this migration once:
+
+```powershell
+Get-Content .\student_management_system_backend\migration_v13.sql | mysql -u YOUR_MYSQL_USER -p
+```
+
+Migration v13 changes only the two foreign-key delete actions from
+`fee_assignments` to `students` and `courses` from `CASCADE` to `RESTRICT`.
+It preserves all existing rows and blocks direct deletes at the database level.
+The API also returns a clear conflict if a student or course has a fee
+assignment. Fresh databases receive the same constraints from `schema.sql`.
+Deleting students or courses without fee assignments remains supported.
+
+### Make fee payment retries idempotent
+
+For an existing database, back it up and apply migration v14 once:
+
+```powershell
+Get-Content .\student_management_system_backend\migration_v14.sql | mysql -u YOUR_MYSQL_USER -p
+```
+
+Migration v14 adds a nullable, unique idempotency key to `fee_payments`.
+Existing payments remain unchanged with a `NULL` key; new payment requests
+must include a UUID key. Repeating a request with the same key and same payment
+returns the original payment with HTTP 200 and `replayed: true`; reusing the key
+for different payment details returns HTTP 409. A new key permits a legitimate
+separate payment even when amount, date, and method match. The frontend creates
+and retains a key for retries while the payment dialog remains open. Fresh
+databases created from `schema.sql` already include the key column and unique
+constraint.
+
+As Admin, create a teacher record in the Teachers page, assign one or more
+courses on the Teacher Course Assignments page, and ensure each course belongs
+to the teacher's department. Then create its login securely from the backend
+folder:
+
+```powershell
+Push-Location .\student_management_system_backend
+& .\.venv\Scripts\python.exe -m app.create_teacher_account
+Pop-Location
+```
+
+Enter the teacher record's email and a password when prompted. The command
+requires a matching existing teacher record and stores only a password hash.
+Teachers sign in through the existing login page. They can view only assigned
+courses and their enrolled students, create/update attendance and marks for
+students enrolled in those courses, and view course results. Teachers cannot
+delete records or manage accounts, courses, or assignments; those operations
+remain Admin-only.
+
 The API does not create or migrate tables at startup. Create the first admin
-after the database is ready. This command runs from the backend folder:
+and any Principal accounts after the database is ready. These commands run
+from the backend folder:
 
 ```powershell
 Push-Location .\student_management_system_backend
 & .\.venv\Scripts\python.exe -m app.create_admin
+& .\.venv\Scripts\python.exe -m app.create_principal
 Pop-Location
 ```
 
-The command prompts for an email and a password (6-8 digits); it
-does not place admin credentials in source code or the database as plaintext.
+Each command securely prompts for an email and password; credentials are not
+placed in source code or stored in the database as plaintext. Student signup
+continues through the existing login page, while Admin and Principal accounts
+are provisioned by these backend commands.
 
 Start the application from the repository root:
 
@@ -217,13 +338,27 @@ Pop-Location
 - Send `Authorization: Bearer <access_token>` on protected routes.
 - Only admins can create, update, or delete students, courses, enrollments,
   attendance, marks, sports achievements, notices, and timetable entries.
+  Principal accounts use the same login endpoint and can read campus records
+  and the Principal dashboard totals, but all data-changing routes remain
+  admin-only. The Principal dashboard reports total students, courses,
+  attendance records, marks, and course-result summaries (one per
+  student/course pair with marks).
   Authenticated students can read notices, their own student record,
   enrollments, attendance, marks, results, sports achievements, timetable, and
   fee details. Only admins can assign course fees to students or record
   payments; course totals are managed through the Courses API. Authenticated
   users can search/view courses.
-- Use `python -m app.create_admin` to create an administrator; there is no
-  public admin registration endpoint.
+- Use `python -m app.create_admin` or `python -m app.create_principal` to
+  provision administrator or Principal accounts; there is no public
+  staff-account registration endpoint.
+- HODs are provisioned with `python -m app.create_hod` after migration v11.
+  Admins manage departments, course mappings, and teachers. HOD reads are
+  department-scoped at the API and all HOD writes are forbidden; existing
+  Admin, Principal, and Student permissions are unchanged.
+- Teachers are provisioned with `python -m app.create_teacher_account` after
+  migration v12. Admins manage teacher-course assignments. Teacher course,
+  student, attendance, marks, and result reads and academic write operations
+  are restricted to the teacher's assigned courses.
 
 ## API routes
 
@@ -259,6 +394,12 @@ Pop-Location
 | POST | `/api/v1/fees/{id}/payments` | Admin | Record a payment |
 | GET | `/api/v1/results` | Authenticated | Course result summary |
 | GET | `/api/v1/dashboard/admin` | Admin | System totals and today's attendance |
+| GET | `/api/v1/dashboard/principal` | Principal | Read-only campus totals for students, courses, attendance, marks, and results |
+| GET | `/api/v1/dashboard/hod` | HOD | Read-only totals for the assigned department |
+| GET / POST | `/api/v1/departments` | Admin / Assigned HOD GET | List departments / create one |
+| GET / PATCH / DELETE | `/api/v1/departments/{id}` | Admin / Assigned HOD GET | Read / update / delete department |
+| GET / POST | `/api/v1/teachers` | Admin / Department HOD GET | List / create department teachers |
+| GET / PATCH / DELETE | `/api/v1/teachers/{id}` | Admin / Department HOD GET | Read / update / delete teacher |
 | GET | `/api/v1/dashboard/student` | Student | Own enrollment, attendance, and mark summary |
 | GET | `/api/v1/dashboard/sports` | Admin | Athlete totals, achievement levels, sports breakdown, and recent achievements |
 

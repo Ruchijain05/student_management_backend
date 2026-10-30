@@ -6,6 +6,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.department_access import department_course_ids, ensure_course_in_department
+from app.teacher_access import ensure_teacher_course, teacher_course_ids
 from app.enums import UserRole
 from app.models import Course, Enrollment, Student, User
 from app.schemas import EnrollmentCreate, EnrollmentRead, EnrollmentUpdate
@@ -24,12 +26,16 @@ def get_enrollment_or_404(enrollment_id: int, db: Session) -> Enrollment:
     return enrollment
 
 
-def ensure_enrollment_access(enrollment: Enrollment, user: User) -> None:
+def ensure_enrollment_access(enrollment: Enrollment, user: User, db: Session) -> None:
     if user.role == UserRole.STUDENT and user.student_id != enrollment.student_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not your enrollment",
         )
+    if user.role == UserRole.HOD:
+        ensure_course_in_department(enrollment.course_id, user, db)
+    if user.role == UserRole.TEACHER:
+        ensure_teacher_course(enrollment.course_id, user, db)
 
 
 def ensure_references_exist(
@@ -84,6 +90,14 @@ def list_enrollments(
         if current_user.student_id is None:
             return []
         statement = statement.where(Enrollment.student_id == current_user.student_id)
+    elif current_user.role == UserRole.HOD:
+        statement = statement.where(
+            Enrollment.course_id.in_(department_course_ids(current_user))
+        )
+    elif current_user.role == UserRole.TEACHER:
+        statement = statement.where(
+            Enrollment.course_id.in_(teacher_course_ids(current_user))
+        )
     elif student_id is not None:
         statement = statement.where(Enrollment.student_id == student_id)
     if course_id is not None:
@@ -97,7 +111,7 @@ def read_enrollment(
     enrollment_id: int, db: DatabaseSession, current_user: CurrentUser
 ) -> Enrollment:
     enrollment = get_enrollment_or_404(enrollment_id, db)
-    ensure_enrollment_access(enrollment, current_user)
+    ensure_enrollment_access(enrollment, current_user, db)
     return enrollment
 
 

@@ -69,6 +69,10 @@ def list_achievements(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> list[SportsAchievement]:
+    if current_user.role == UserRole.HOD:
+        raise HTTPException(status_code=403, detail="Sports records are not part of HOD department reporting")
+    if current_user.role == UserRole.TEACHER:
+        raise HTTPException(status_code=403, detail="Sports records are not available to teachers")
     statement = select(SportsAchievement)
     if current_user.role == UserRole.STUDENT:
         if current_user.student_id is None:
@@ -98,6 +102,10 @@ def list_achievements(
 def read_achievement(
     achievement_id: int, db: DatabaseSession, current_user: CurrentUser
 ) -> SportsAchievement:
+    if current_user.role == UserRole.HOD:
+        raise HTTPException(status_code=403, detail="Sports records are not part of HOD department reporting")
+    if current_user.role == UserRole.TEACHER:
+        raise HTTPException(status_code=403, detail="Sports records are not available to teachers")
     achievement = get_achievement_or_404(achievement_id, db)
     ensure_achievement_access(achievement, current_user)
     return achievement

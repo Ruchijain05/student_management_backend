@@ -6,6 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.department_access import department_course_ids
+from app.teacher_access import teacher_course_ids
 from app.enums import UserRole
 from app.models import Course, Mark
 from app.schemas import CourseResult
@@ -41,6 +43,10 @@ def list_results(
             )
         student_id = current_user.student_id
     statement = select(Mark, Course).join(Course, Course.id == Mark.course_id)
+    if current_user.role == UserRole.HOD:
+        statement = statement.where(Course.id.in_(department_course_ids(current_user)))
+    elif current_user.role == UserRole.TEACHER:
+        statement = statement.where(Course.id.in_(teacher_course_ids(current_user)))
     if student_id is not None:
         statement = statement.where(Mark.student_id == student_id)
 

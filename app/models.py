@@ -46,8 +46,19 @@ class Student(Base):
         back_populates="student", cascade="all, delete-orphan", uselist=False
     )
     fee_assignments: Mapped[list["FeeAssignment"]] = relationship(
-        back_populates="student", cascade="all, delete-orphan"
+        back_populates="student", passive_deletes="all"
     )
+
+
+class Department(Base):
+    __tablename__ = "departments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(150), unique=True, nullable=False)
+
+    courses: Mapped[list["Course"]] = relationship(back_populates="department")
+    teachers: Mapped[list["Teacher"]] = relationship(back_populates="department")
+    users: Mapped[list["User"]] = relationship(back_populates="department")
 
 
 class Course(Base):
@@ -58,7 +69,14 @@ class Course(Base):
     title: Mapped[str] = mapped_column(String(150), nullable=False)
     description: Mapped[str | None] = mapped_column(String(500))
     course_fee: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    department_id: Mapped[int | None] = mapped_column(
+        ForeignKey("departments.id", ondelete="RESTRICT"), index=True
+    )
 
+    department: Mapped[Department | None] = relationship(back_populates="courses")
+    teacher_assignments: Mapped[list["TeacherCourse"]] = relationship(
+        back_populates="course", cascade="all, delete-orphan"
+    )
     enrollments: Mapped[list["Enrollment"]] = relationship(
         back_populates="course", cascade="all, delete-orphan"
     )
@@ -72,7 +90,7 @@ class Course(Base):
         back_populates="course", cascade="all, delete-orphan"
     )
     fee_assignments: Mapped[list["FeeAssignment"]] = relationship(
-        back_populates="course", cascade="all, delete-orphan"
+        back_populates="course", passive_deletes="all"
     )
 
 
@@ -120,11 +138,53 @@ class User(Base):
     student_id: Mapped[int | None] = mapped_column(
         ForeignKey("students.id", ondelete="CASCADE"), unique=True
     )
+    department_id: Mapped[int | None] = mapped_column(
+        ForeignKey("departments.id", ondelete="RESTRICT"), index=True
+    )
+    teacher_id: Mapped[int | None] = mapped_column(
+        ForeignKey("teachers.id", ondelete="CASCADE"), unique=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.current_timestamp(), nullable=False
     )
 
     student: Mapped[Student | None] = relationship(back_populates="user")
+    department: Mapped[Department | None] = relationship(back_populates="users")
+    teacher: Mapped["Teacher | None"] = relationship(back_populates="user")
+
+
+class Teacher(Base):
+    __tablename__ = "teachers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    department_id: Mapped[int] = mapped_column(
+        ForeignKey("departments.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+
+    department: Mapped[Department] = relationship(back_populates="teachers")
+    user: Mapped["User | None"] = relationship(back_populates="teacher", uselist=False)
+    course_assignments: Mapped[list["TeacherCourse"]] = relationship(
+        back_populates="teacher", cascade="all, delete-orphan"
+    )
+
+
+class TeacherCourse(Base):
+    __tablename__ = "teacher_courses"
+    __table_args__ = (
+        UniqueConstraint("teacher_id", "course_id", name="uq_teacher_course"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    teacher_id: Mapped[int] = mapped_column(
+        ForeignKey("teachers.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    course_id: Mapped[int] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    teacher: Mapped[Teacher] = relationship(back_populates="course_assignments")
+    course: Mapped[Course] = relationship(back_populates="teacher_assignments")
 
 
 class PasswordResetToken(Base):
@@ -277,10 +337,10 @@ class FeeAssignment(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     student_id: Mapped[int] = mapped_column(
-        ForeignKey("students.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("students.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     course_id: Mapped[int] = mapped_column(
-        ForeignKey("courses.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("courses.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     total_fee: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
 
@@ -302,6 +362,9 @@ class FeePayment(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(36), unique=True
+    )
     fee_assignment_id: Mapped[int] = mapped_column(
         ForeignKey("fee_assignments.id", ondelete="CASCADE"),
         nullable=False,

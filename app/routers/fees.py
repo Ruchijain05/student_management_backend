@@ -1,18 +1,20 @@
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.database import get_db
+from app.department_access import department_course_ids, ensure_course_in_department
 from app.enums import UserRole
 from app.models import Course, Enrollment, FeeAssignment, FeePayment, Student
 from app.schemas import (
     FeeAssignmentCreate,
     FeeAssignmentRead,
     FeePaymentCreate,
+    FeePaymentRecordResponse,
     FeePaymentRead,
 )
 from app.security import AdminUser, CurrentUser
@@ -136,6 +138,8 @@ def list_fee_assignments(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ) -> list[FeeAssignmentRead]:
+    if current_user.role == UserRole.TEACHER:
+        raise HTTPException(status_code=403, detail="Fee records are not available to teachers")
     statement = select(FeeAssignment).options(
         joinedload(FeeAssignment.student),
         joinedload(FeeAssignment.course),
@@ -146,6 +150,10 @@ def list_fee_assignments(
             return []
         statement = statement.where(
             FeeAssignment.student_id == current_user.student_id
+        )
+    elif current_user.role == UserRole.HOD:
+        statement = statement.where(
+            FeeAssignment.course_id.in_(department_course_ids(current_user))
         )
     elif student_id is not None:
         statement = statement.where(FeeAssignment.student_id == student_id)
@@ -161,6 +169,8 @@ def list_fee_assignments(
 def read_fee_assignment(
     fee_id: int, db: DatabaseSession, current_user: CurrentUser
 ) -> FeeAssignmentRead:
+    if current_user.role == UserRole.TEACHER:
+        raise HTTPException(status_code=403, detail="Fee records are not available to teachers")
     assignment = fee_assignment_or_404(fee_id, db)
     if (
         current_user.role == UserRole.STUDENT
@@ -170,12 +180,14 @@ def read_fee_assignment(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Fee assignment not found",
         )
+    if current_user.role == UserRole.HOD:
+        ensure_course_in_department(assignment.course_id, current_user, db)
     return fee_read(assignment)
 
 
 @router.post(
     "/{fee_id}/payments",
-    response_model=FeePaymentRead,
+    response_model=FeePaymentRecordResponse,
     status_code=status.HTTP_201_CREATED,
 )
 def record_fee_payment(
@@ -183,8 +195,19 @@ def record_fee_payment(
     payment_data: FeePaymentCreate,
     db: DatabaseSession,
     _: AdminUser,
-) -> FeePayment:
+    response: Response,
+) -> FeePaymentRecordResponse:
     assignment = fee_assignment_or_404(fee_id, db)
+    idempotency_key = str(payment_data.idempotency_key)
+    existing_payment = db.scalar(
+        select(FeePayment).where(FeePayment.idempotency_key == idempotency_key)
+    )
+    if existing_payment is not None:
+        response.status_code = status.HTTP_200_OK
+        return payment_idempotency_response(
+            existing_payment, fee_id, payment_data
+        )
+
     paid_fee = sum((payment.amount for payment in assignment.payments), start=ZERO)
     if payment_data.amount > assignment.total_fee - paid_fee:
         raise HTTPException(
@@ -192,9 +215,48 @@ def record_fee_payment(
             detail="Payment cannot exceed the pending fee balance",
         )
     payment = FeePayment(
-        fee_assignment_id=fee_id, **payment_data.model_dump()
+        fee_assignment_id=fee_id,
+        **payment_data.model_dump(exclude={"idempotency_key"}),
+        idempotency_key=idempotency_key,
     )
     db.add(payment)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        existing_payment = db.scalar(
+            select(FeePayment).where(
+                FeePayment.idempotency_key == idempotency_key
+            )
+        )
+        if existing_payment is not None:
+            response.status_code = status.HTTP_200_OK
+            return payment_idempotency_response(
+                existing_payment, fee_id, payment_data
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Payment could not be recorded because a conflicting record exists",
+        ) from exc
     db.refresh(payment)
-    return payment
+    return FeePaymentRecordResponse.model_validate(payment)
+
+
+def payment_idempotency_response(
+    payment: FeePayment,
+    fee_id: int,
+    payment_data: FeePaymentCreate,
+) -> FeePaymentRecordResponse:
+    if (
+        payment.fee_assignment_id != fee_id
+        or payment.amount != payment_data.amount
+        or payment.payment_date != payment_data.payment_date
+        or payment.payment_method != payment_data.payment_method
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This idempotency key was already used for a different payment",
+        )
+    return FeePaymentRecordResponse.model_validate(payment).model_copy(
+        update={"replayed": True}
+    )

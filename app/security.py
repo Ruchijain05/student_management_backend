@@ -108,3 +108,28 @@ def require_role(role: UserRole) -> Callable[..., User]:
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
 AdminUser = Annotated[User, Depends(require_role(UserRole.ADMIN))]
+PrincipalUser = Annotated[User, Depends(require_role(UserRole.PRINCIPAL))]
+
+
+def require_hod(current_user: CurrentUser) -> User:
+    if current_user.role != UserRole.HOD or current_user.department_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="HOD account with an assigned department required",
+        )
+    return current_user
+
+
+HODUser = Annotated[User, Depends(require_hod)]
+
+
+def require_teacher(current_user: CurrentUser) -> User:
+    if current_user.role != UserRole.TEACHER or current_user.teacher_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Teacher account linked to a teacher record required",
+        )
+    return current_user
+
+
+TeacherUser = Annotated[User, Depends(require_teacher)]

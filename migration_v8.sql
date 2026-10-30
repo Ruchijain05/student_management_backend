@@ -11,9 +11,9 @@ CREATE TABLE IF NOT EXISTS fee_assignments (
     KEY ix_fee_assignments_course_id (course_id),
     CONSTRAINT ck_fee_assignment_total_positive CHECK (total_fee > 0),
     CONSTRAINT fk_fee_assignments_student
-        FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE,
+        FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE RESTRICT,
     CONSTRAINT fk_fee_assignments_course
-        FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE
+        FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE RESTRICT
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS fee_payments (

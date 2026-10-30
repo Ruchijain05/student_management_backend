@@ -6,6 +6,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.academic import ensure_student_enrolled
+from app.department_access import department_course_ids, ensure_course_in_department
+from app.teacher_access import (
+    ensure_course_student_enrolled,
+    ensure_teacher_course,
+    teacher_course_ids,
+)
 from app.database import get_db
 from app.enums import UserRole
 from app.models import Mark, User
@@ -25,17 +31,26 @@ def get_mark_or_404(mark_id: int, db: Session) -> Mark:
     return mark
 
 
-def ensure_mark_access(mark: Mark, user: User) -> None:
+def ensure_mark_access(mark: Mark, user: User, db: Session) -> None:
     if user.role == UserRole.STUDENT and user.student_id != mark.student_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Not your mark"
         )
+    if user.role == UserRole.HOD:
+        ensure_course_in_department(mark.course_id, user, db)
+    if user.role == UserRole.TEACHER:
+        ensure_teacher_course(mark.course_id, user, db)
 
 
 @router.post("", response_model=MarkRead, status_code=status.HTTP_201_CREATED)
 def create_mark(
-    mark_data: MarkCreate, db: DatabaseSession, _: AdminUser
+    mark_data: MarkCreate, db: DatabaseSession, current_user: CurrentUser
 ) -> Mark:
+    if current_user.role == UserRole.TEACHER:
+        ensure_teacher_course(mark_data.course_id, current_user, db)
+        ensure_course_student_enrolled(mark_data.course_id, mark_data.student_id, db)
+    elif current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin or assigned teacher required")
     ensure_student_enrolled(mark_data.student_id, mark_data.course_id, db)
     mark = Mark(**mark_data.model_dump())
     db.add(mark)
@@ -65,6 +80,10 @@ def list_marks(
         if current_user.student_id is None:
             return []
         statement = statement.where(Mark.student_id == current_user.student_id)
+    elif current_user.role == UserRole.HOD:
+        statement = statement.where(Mark.course_id.in_(department_course_ids(current_user)))
+    elif current_user.role == UserRole.TEACHER:
+        statement = statement.where(Mark.course_id.in_(teacher_course_ids(current_user)))
     elif student_id is not None:
         statement = statement.where(Mark.student_id == student_id)
     if course_id is not None:
@@ -76,15 +95,19 @@ def list_marks(
 @router.get("/{mark_id}", response_model=MarkRead)
 def read_mark(mark_id: int, db: DatabaseSession, current_user: CurrentUser) -> Mark:
     mark = get_mark_or_404(mark_id, db)
-    ensure_mark_access(mark, current_user)
+    ensure_mark_access(mark, current_user, db)
     return mark
 
 
 @router.patch("/{mark_id}", response_model=MarkRead)
 def update_mark(
-    mark_id: int, mark_data: MarkUpdate, db: DatabaseSession, _: AdminUser
+    mark_id: int, mark_data: MarkUpdate, db: DatabaseSession, current_user: CurrentUser
 ) -> Mark:
     mark = get_mark_or_404(mark_id, db)
+    if current_user.role == UserRole.TEACHER:
+        ensure_teacher_course(mark.course_id, current_user, db)
+    elif current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin or assigned teacher required")
     changes = mark_data.model_dump(exclude_unset=True)
     score = changes.get("score", mark.score)
     max_score = changes.get("max_score", mark.max_score)

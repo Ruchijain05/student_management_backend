@@ -4,6 +4,9 @@ from enum import Enum
 class UserRole(str, Enum):
     ADMIN = "admin"
     STUDENT = "student"
+    PRINCIPAL = "principal"
+    HOD = "hod"
+    TEACHER = "teacher"
 
 
 class AttendanceStatus(str, Enum):

@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.enums import UserRole
 from app.main import app
-from app.models import User
+from app.models import Course, FeeAssignment, Student, TeacherCourse, User
 from app.security import hash_password
 
 
@@ -39,6 +39,13 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Generator[TestClient, None, None]
                 role=UserRole.ADMIN,
             )
         )
+        session.add(
+            User(
+                email="principal@example.com",
+                password_hash=hash_password("principal-password"),
+                role=UserRole.PRINCIPAL,
+            )
+        )
         session.commit()
 
     with TestClient(app) as test_client:
@@ -55,6 +62,48 @@ def login(client: TestClient, email: str, password: str) -> dict[str, str]:
     )
     assert response.status_code == 200
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+def test_teacher_course_assignments_use_association_table() -> None:
+    assert "teacher_id" not in Course.__table__.columns
+    assert {"teacher_id", "course_id"} <= set(TeacherCourse.__table__.columns.keys())
+    assert Course.teacher_assignments.property.mapper.class_ is TeacherCourse
+
+
+def add_hod_account(
+    email: str, password: str, department_id: int | None
+) -> None:
+    database = app.dependency_overrides[get_db]()
+    session = next(database)
+    try:
+        session.add(
+            User(
+                email=email,
+                password_hash=hash_password(password),
+                role=UserRole.HOD,
+                department_id=department_id,
+            )
+        )
+        session.commit()
+    finally:
+        database.close()
+
+
+def add_teacher_account(email: str, password: str, teacher_id: int) -> None:
+    database = app.dependency_overrides[get_db]()
+    session = next(database)
+    try:
+        session.add(
+            User(
+                email=email,
+                password_hash=hash_password(password),
+                role=UserRole.TEACHER,
+                teacher_id=teacher_id,
+            )
+        )
+        session.commit()
+    finally:
+        database.close()
 
 
 def test_swagger_oauth_login_and_authorized_openapi(client: TestClient) -> None:
@@ -357,6 +406,16 @@ def test_registration_requires_six_to_eight_ascii_digits(
 def test_roles_search_attendance_marks_results_and_dashboards(
     client: TestClient,
 ) -> None:
+    assert client.post(
+        "/api/v1/auth/register",
+        json={
+            "first_name": "Unauthorised",
+            "last_name": "Principal",
+            "email": "untrusted.principal@example.com",
+            "password": "246810",
+            "role": "principal",
+        },
+    ).status_code == 422
     signup = client.post(
         "/api/v1/auth/register",
         json={
@@ -486,11 +545,100 @@ def test_roles_search_attendance_marks_results_and_dashboards(
     assert dashboard.status_code == 200
     assert dashboard.json()["attendance_percentage"] == 100
     assert client.get(
+        "/api/v1/dashboard/principal", headers=student_headers
+    ).status_code == 403
+    assert client.get(
         "/api/v1/dashboard/admin", headers=student_headers
     ).status_code == 403
     assert client.get(
         "/api/v1/dashboard/admin", headers=admin_headers
     ).json()["total_students"] == 2
+    principal_headers = login(
+        client, "principal@example.com", "principal-password"
+    )
+    principal_user = client.get(
+        "/api/v1/auth/me", headers=principal_headers
+    )
+    assert principal_user.status_code == 200
+    assert principal_user.json()["role"] == "principal"
+    principal_summary = client.get(
+        "/api/v1/dashboard/principal", headers=principal_headers
+    )
+    assert principal_summary.status_code == 200
+    assert principal_summary.json() == {
+        "total_students": 2,
+        "total_courses": 1,
+        "total_attendance": 1,
+        "total_marks": 1,
+        "total_results": 1,
+    }
+    assert client.get(
+        "/api/v1/dashboard/admin", headers=principal_headers
+    ).status_code == 403
+    assert client.get(
+        "/api/v1/dashboard/principal", headers=admin_headers
+    ).status_code == 403
+    assert client.get(
+        "/api/v1/students", headers=principal_headers
+    ).status_code == 200
+    assert client.get(
+        "/api/v1/results", headers=principal_headers
+    ).status_code == 200
+    assert client.get(
+        "/api/v1/enrollments", headers=principal_headers
+    ).json()[0]["student_id"] == student_id
+    assert client.get(
+        "/api/v1/attendance", headers=principal_headers
+    ).json()[0]["student_id"] == student_id
+    assert client.get(
+        "/api/v1/marks", headers=principal_headers
+    ).json()[0]["student_id"] == student_id
+    assert client.get(
+        "/api/v1/fees", headers=principal_headers
+    ).status_code == 200
+    assert client.get(
+        f"/api/v1/students/{student_id}", headers=principal_headers
+    ).json()["email"] == "ada.updated@example.com"
+    assert client.get(
+        f"/api/v1/courses/{course_id}", headers=principal_headers
+    ).json()["code"] == "CS101"
+    assert client.post(
+        "/api/v1/students",
+        json={
+            "first_name": "Principal",
+            "last_name": "Cannot Create",
+            "email": "blocked@example.com",
+        },
+        headers=principal_headers,
+    ).status_code == 403
+    assert client.post(
+        "/api/v1/courses",
+        json={"code": "CS102", "title": "Data Structures"},
+        headers=principal_headers,
+    ).status_code == 403
+    assert client.post(
+        "/api/v1/enrollments",
+        json={"student_id": student_id, "course_id": course_id},
+        headers=principal_headers,
+    ).status_code == 403
+    assert client.post(
+        "/api/v1/marks",
+        json={**mark_payload, "assessment_name": "Second"},
+        headers=principal_headers,
+    ).status_code == 403
+    assert client.post(
+        "/api/v1/fees",
+        json={"student_id": student_id, "course_id": course_id},
+        headers=principal_headers,
+    ).status_code == 403
+    assert client.patch(
+        f"/api/v1/attendance/{attendance_id}",
+        json={"status": "late"},
+        headers=principal_headers,
+    ).status_code == 403
+    assert client.delete(
+        f"/api/v1/marks/{mark_id}", headers=principal_headers
+    ).status_code == 403
     assert client.delete(
         f"/api/v1/attendance/{attendance_id}", headers=admin_headers
     ).status_code == 204
@@ -1108,9 +1256,30 @@ def test_fee_assignments_payments_totals_and_student_access(
     assert client.post(
         f"/api/v1/fees/{fee_data['id']}/payments",
         json={
+            "amount": "0",
+            "payment_date": "2026-10-22",
+            "payment_method": "upi",
+            "idempotency_key": "10c4a70d-8739-47f3-a5ee-1d4bd2f4d9a0",
+        },
+        headers=admin_headers,
+    ).status_code == 422
+    assert client.post(
+        f"/api/v1/fees/{fee_data['id']}/payments",
+        json={
+            "amount": "-1.00",
+            "payment_date": "2026-10-22",
+            "payment_method": "upi",
+            "idempotency_key": "20c4a70d-8739-47f3-a5ee-1d4bd2f4d9a0",
+        },
+        headers=admin_headers,
+    ).status_code == 422
+    assert client.post(
+        f"/api/v1/fees/{fee_data['id']}/payments",
+        json={
             "amount": "500",
             "payment_date": "2026-10-23",
             "payment_method": "upi",
+            "idempotency_key": "30c4a70d-8739-47f3-a5ee-1d4bd2f4d9a0",
         },
         headers=student_headers,
     ).status_code == 403
@@ -1121,17 +1290,57 @@ def test_fee_assignments_payments_totals_and_student_access(
             "amount": "500.00",
             "payment_date": "2026-10-22",
             "payment_method": "upi",
+            "idempotency_key": "40c4a70d-8739-47f3-a5ee-1d4bd2f4d9a0",
         },
         headers=admin_headers,
     )
     assert first_payment.status_code == 201
+    assert first_payment.json()["replayed"] is False
+    repeated_payment = client.post(
+        f"/api/v1/fees/{fee_data['id']}/payments",
+        json={
+            "amount": "500.00",
+            "payment_date": "2026-10-22",
+            "payment_method": "upi",
+            "idempotency_key": "40c4a70d-8739-47f3-a5ee-1d4bd2f4d9a0",
+        },
+        headers=admin_headers,
+    )
+    assert repeated_payment.status_code == 200
+    assert repeated_payment.json()["replayed"] is True
+    assert repeated_payment.json()["id"] == first_payment.json()["id"]
+    conflicting_retry = client.post(
+        f"/api/v1/fees/{fee_data['id']}/payments",
+        json={
+            "amount": "501.00",
+            "payment_date": "2026-10-22",
+            "payment_method": "upi",
+            "idempotency_key": "40c4a70d-8739-47f3-a5ee-1d4bd2f4d9a0",
+        },
+        headers=admin_headers,
+    )
+    assert conflicting_retry.status_code == 409
+    assert "already used for a different payment" in conflicting_retry.json()["detail"]
+    separate_payment = client.post(
+        f"/api/v1/fees/{fee_data['id']}/payments",
+        json={
+            "amount": "500.00",
+            "payment_date": "2026-10-22",
+            "payment_method": "upi",
+            "idempotency_key": "50c4a70d-8739-47f3-a5ee-1d4bd2f4d9a0",
+        },
+        headers=admin_headers,
+    )
+    assert separate_payment.status_code == 201
+    assert separate_payment.json()["id"] != first_payment.json()["id"]
     partial = client.get(
         "/api/v1/fees", headers=student_headers
     ).json()[0]
-    assert partial["paid_fee"] == "500.00"
-    assert partial["pending_fee"] == "700.00"
+    assert partial["paid_fee"] == "1000.00"
+    assert partial["pending_fee"] == "200.00"
     assert partial["status"] == "Partial"
-    assert partial["payments"][0]["payment_method"] == "upi"
+    assert len(partial["payments"]) == 2
+    assert {payment["payment_method"] for payment in partial["payments"]} == {"upi"}
     assert client.get("/api/v1/fees", headers=other_headers).json() == []
 
     updated_course = client.patch(
@@ -1144,7 +1353,13 @@ def test_fee_assignments_payments_totals_and_student_access(
         "/api/v1/fees", headers=student_headers
     ).json()[0]
     assert partial_after_course_edit["total_fee"] == "1300.00"
-    assert partial_after_course_edit["pending_fee"] == "800.00"
+    assert partial_after_course_edit["paid_fee"] == "1000.00"
+    assert partial_after_course_edit["pending_fee"] == "300.00"
+    assert len(partial_after_course_edit["payments"]) == 2
+    assert sorted(payment["amount"] for payment in partial_after_course_edit["payments"]) == [
+        "500.00",
+        "500.00",
+    ]
     assert client.patch(
         f"/api/v1/courses/{course_id}",
         json={"course_fee": "499.99"},
@@ -1159,27 +1374,156 @@ def test_fee_assignments_payments_totals_and_student_access(
     assert client.post(
         f"/api/v1/fees/{fee_data['id']}/payments",
         json={
-            "amount": "800.01",
+            "amount": "300.01",
             "payment_date": "2026-10-23",
             "payment_method": "cash",
+            "idempotency_key": "60c4a70d-8739-47f3-a5ee-1d4bd2f4d9a0",
         },
         headers=admin_headers,
     ).status_code == 422
     final_payment = client.post(
         f"/api/v1/fees/{fee_data['id']}/payments",
         json={
-            "amount": "800.00",
+            "amount": "300.00",
             "payment_date": "2026-10-23",
             "payment_method": "bank_transfer",
+            "idempotency_key": "70c4a70d-8739-47f3-a5ee-1d4bd2f4d9a0",
         },
         headers=admin_headers,
     )
     assert final_payment.status_code == 201
+    final_payment_retry = client.post(
+        f"/api/v1/fees/{fee_data['id']}/payments",
+        json={
+            "amount": "300.00",
+            "payment_date": "2026-10-23",
+            "payment_method": "bank_transfer",
+            "idempotency_key": "70c4a70d-8739-47f3-a5ee-1d4bd2f4d9a0",
+        },
+        headers=admin_headers,
+    )
+    assert final_payment_retry.status_code == 200
+    assert final_payment_retry.json()["replayed"] is True
+    assert final_payment_retry.json()["id"] == final_payment.json()["id"]
     paid = client.get("/api/v1/fees", headers=student_headers).json()[0]
     assert paid["total_fee"] == paid["paid_fee"] == "1300.00"
     assert paid["pending_fee"] == "0.00"
     assert paid["status"] == "Paid"
-    assert len(paid["payments"]) == 2
+    assert len(paid["payments"]) == 3
+    assert sorted(payment["amount"] for payment in paid["payments"]) == [
+        "300.00",
+        "500.00",
+        "500.00",
+    ]
+
+
+def test_student_and_course_deletion_preserve_fee_records(
+    client: TestClient,
+) -> None:
+    admin_headers = login(client, "admin@example.com", "correct-horse-battery")
+
+    def register_student(email: str) -> int:
+        response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "first_name": "Finance",
+                "last_name": "Test",
+                "email": email,
+                "password": "246810",
+            },
+        )
+        assert response.status_code == 201
+        return int(response.json()["user"]["student_id"])
+
+    paid_student_id = register_student("paid-finance@example.com")
+    assigned_student_id = register_student("assigned-finance@example.com")
+    no_fee_student_id = register_student("no-fee-finance@example.com")
+    course_response = client.post(
+        "/api/v1/courses",
+        json={
+            "code": "FIN201",
+            "title": "Financial Records Course",
+            "course_fee": "900.00",
+        },
+        headers=admin_headers,
+    )
+    assert course_response.status_code == 201
+    course_id = int(course_response.json()["id"])
+
+    for student_id in (paid_student_id, assigned_student_id):
+        assert client.post(
+            "/api/v1/enrollments",
+            json={"student_id": student_id, "course_id": course_id},
+            headers=admin_headers,
+        ).status_code == 201
+    paid_fee = client.post(
+        "/api/v1/fees",
+        json={"student_id": paid_student_id, "course_id": course_id},
+        headers=admin_headers,
+    )
+    assigned_fee = client.post(
+        "/api/v1/fees",
+        json={"student_id": assigned_student_id, "course_id": course_id},
+        headers=admin_headers,
+    )
+    assert paid_fee.status_code == assigned_fee.status_code == 201
+    payment = client.post(
+        f"/api/v1/fees/{paid_fee.json()['id']}/payments",
+        json={
+            "amount": "250.00",
+            "payment_date": "2026-10-24",
+            "payment_method": "upi",
+            "idempotency_key": "80c4a70d-8739-47f3-a5ee-1d4bd2f4d9a0",
+        },
+        headers=admin_headers,
+    )
+    assert payment.status_code == 201
+
+    blocked_paid_student = client.delete(
+        f"/api/v1/students/{paid_student_id}", headers=admin_headers
+    )
+    assert blocked_paid_student.status_code == 409
+    assert "fee assignments or payment history" in blocked_paid_student.json()["detail"]
+    blocked_assigned_student = client.delete(
+        f"/api/v1/students/{assigned_student_id}", headers=admin_headers
+    )
+    assert blocked_assigned_student.status_code == 409
+    assert "fee assignments or payment history" in blocked_assigned_student.json()["detail"]
+    blocked_course = client.delete(
+        f"/api/v1/courses/{course_id}", headers=admin_headers
+    )
+    assert blocked_course.status_code == 409
+    assert "fee assignments or payment history" in blocked_course.json()["detail"]
+
+    preserved_fees = client.get("/api/v1/fees", headers=admin_headers)
+    assert preserved_fees.status_code == 200
+    by_student = {item["student_id"]: item for item in preserved_fees.json()}
+    assert set(by_student) == {paid_student_id, assigned_student_id}
+    assert by_student[paid_student_id]["payments"][0]["id"] == payment.json()["id"]
+    assert by_student[paid_student_id]["paid_fee"] == "250.00"
+    assert by_student[assigned_student_id]["payments"] == []
+
+    free_course = client.post(
+        "/api/v1/courses",
+        json={"code": "FIN202", "title": "No Financial Records Course"},
+        headers=admin_headers,
+    )
+    assert free_course.status_code == 201
+    assert client.delete(
+        f"/api/v1/students/{no_fee_student_id}", headers=admin_headers
+    ).status_code == 204
+    assert client.delete(
+        f"/api/v1/courses/{free_course.json()['id']}", headers=admin_headers
+    ).status_code == 204
+
+    foreign_keys = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in FeeAssignment.__table__.foreign_keys
+    }
+    assert foreign_keys["student_id"] == "RESTRICT"
+    assert foreign_keys["course_id"] == "RESTRICT"
+    assert Student.fee_assignments.property.passive_deletes == "all"
+    assert Course.fee_assignments.property.passive_deletes == "all"
 
 
 def test_registration_never_grants_admin_and_rejects_bad_login(
@@ -1211,3 +1555,576 @@ def test_registration_never_grants_admin_and_rejects_bad_login(
         "/api/v1/auth/login",
         json={"email": "admin@example.com", "password": "wrong-password"},
     ).status_code == 401
+
+
+def test_hod_login_department_isolation_and_read_only_permissions(
+    client: TestClient,
+) -> None:
+    admin_headers = login(client, "admin@example.com", "correct-horse-battery")
+
+    def admin_create(path: str, body: dict[str, object]) -> dict[str, object]:
+        response = client.post(path, json=body, headers=admin_headers)
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    department_a = admin_create(
+        "/api/v1/departments", {"name": "Computer Science"}
+    )
+    department_b = admin_create("/api/v1/departments", {"name": "Mathematics"})
+    department_a_id = int(department_a["id"])
+    department_b_id = int(department_b["id"])
+    add_hod_account("hod.cs@example.com", "Hod-password9!", department_a_id)
+
+    course_a = admin_create(
+        "/api/v1/courses",
+        {
+            "code": "CS101",
+            "title": "Computer Science",
+            "course_fee": "1000.00",
+            "department_id": department_a_id,
+        },
+    )
+    course_b = admin_create(
+        "/api/v1/courses",
+        {"code": "MA101", "title": "Mathematics", "department_id": department_b_id},
+    )
+    course_unassigned = admin_create(
+        "/api/v1/courses", {"code": "OLD101", "title": "Legacy course"}
+    )
+    student_a = admin_create(
+        "/api/v1/students",
+        {"first_name": "Ada", "last_name": "Lovelace", "email": "ada@example.com"},
+    )
+    student_b = admin_create(
+        "/api/v1/students",
+        {"first_name": "Alan", "last_name": "Turing", "email": "alan@example.com"},
+    )
+    student_a_id = int(student_a["id"])
+    student_b_id = int(student_b["id"])
+    course_a_id = int(course_a["id"])
+    course_b_id = int(course_b["id"])
+    enrollment_a = admin_create(
+        "/api/v1/enrollments",
+        {"student_id": student_a_id, "course_id": course_a_id},
+    )
+    enrollment_b = admin_create(
+        "/api/v1/enrollments",
+        {"student_id": student_b_id, "course_id": course_b_id},
+    )
+    attendance_a = admin_create(
+        "/api/v1/attendance",
+        {
+            "student_id": student_a_id,
+            "course_id": course_a_id,
+            "attendance_date": "2026-10-21",
+            "status": "present",
+        },
+    )
+    attendance_b = admin_create(
+        "/api/v1/attendance",
+        {
+            "student_id": student_b_id,
+            "course_id": course_b_id,
+            "attendance_date": "2026-10-21",
+            "status": "absent",
+        },
+    )
+    mark_a = admin_create(
+        "/api/v1/marks",
+        {
+            "student_id": student_a_id,
+            "course_id": course_a_id,
+            "assessment_name": "Exam",
+            "score": 90,
+            "max_score": 100,
+        },
+    )
+    mark_b = admin_create(
+        "/api/v1/marks",
+        {
+            "student_id": student_b_id,
+            "course_id": course_b_id,
+            "assessment_name": "Exam",
+            "score": 60,
+            "max_score": 100,
+        },
+    )
+    fee_a = admin_create(
+        "/api/v1/fees", {"student_id": student_a_id, "course_id": course_a_id}
+    )
+    teacher_a = admin_create(
+        "/api/v1/teachers",
+        {
+            "name": "Grace Hopper",
+            "email": "grace@example.com",
+            "department_id": department_a_id,
+        },
+    )
+    teacher_b = admin_create(
+        "/api/v1/teachers",
+        {
+            "name": "Emmy Noether",
+            "email": "emmy@example.com",
+            "department_id": department_b_id,
+        },
+    )
+    timetable_a = admin_create(
+        "/api/v1/timetable",
+        {
+            "course_id": course_a_id,
+            "weekday": "Monday",
+            "start_time": "09:00",
+            "end_time": "10:00",
+            "classroom_number": "Room 1",
+        },
+    )
+    timetable_b = admin_create(
+        "/api/v1/timetable",
+        {
+            "course_id": course_b_id,
+            "weekday": "Tuesday",
+            "start_time": "09:00",
+            "end_time": "10:00",
+            "classroom_number": "Room 2",
+        },
+    )
+    sports_a = admin_create(
+        "/api/v1/sports",
+        {
+            "student_id": student_a_id,
+            "sport_name": "Cricket",
+            "level": "district",
+            "achievement_date": "2026-10-21",
+        },
+    )
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": "hod.cs@example.com", "password": "Hod-password9!"},
+    )
+    assert response.status_code == 200
+    assert response.json()["user"]["role"] == "hod"
+    assert response.json()["user"]["department_id"] == department_a_id
+    hod_headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+    def listed_ids(path: str) -> list[int]:
+        result = client.get(path, headers=hod_headers)
+        assert result.status_code == 200, result.text
+        return [int(item["id"]) for item in result.json()]
+
+    assert listed_ids("/api/v1/departments") == [department_a_id]
+    assert listed_ids("/api/v1/courses") == [course_a_id]
+    assert listed_ids("/api/v1/students") == [student_a_id]
+    assert listed_ids("/api/v1/enrollments") == [int(enrollment_a["id"])]
+    assert listed_ids("/api/v1/attendance") == [int(attendance_a["id"])]
+    assert listed_ids("/api/v1/marks") == [int(mark_a["id"])]
+    assert listed_ids("/api/v1/fees") == [int(fee_a["id"])]
+    assert listed_ids("/api/v1/teachers") == [int(teacher_a["id"])]
+    timetable_list = client.get("/api/v1/timetable", headers=hod_headers)
+    assert timetable_list.status_code == 200
+    assert [row["id"] for row in timetable_list.json()] == [timetable_a["id"]]
+    assert course_b_id not in listed_ids("/api/v1/courses")
+    assert int(course_unassigned["id"]) not in listed_ids("/api/v1/courses")
+
+    results = client.get("/api/v1/results", headers=hod_headers)
+    assert results.status_code == 200
+    assert [item["student_id"] for item in results.json()] == [student_a_id]
+    dashboard = client.get("/api/v1/dashboard/hod", headers=hod_headers)
+    assert dashboard.status_code == 200
+    assert dashboard.json()["department_id"] == department_a_id
+    assert dashboard.json()["total_students"] == 1
+    assert dashboard.json()["total_teachers"] == 1
+
+    for path in (
+        f"/api/v1/departments/{department_b_id}",
+        f"/api/v1/courses/{course_b_id}",
+        f"/api/v1/students/{student_b_id}",
+        f"/api/v1/enrollments/{enrollment_b['id']}",
+        f"/api/v1/attendance/{attendance_b['id']}",
+        f"/api/v1/marks/{mark_b['id']}",
+        f"/api/v1/teachers/{teacher_b['id']}",
+        f"/api/v1/timetable/{timetable_b['id']}",
+    ):
+        assert client.get(path, headers=hod_headers).status_code == 404
+
+    assert client.get("/api/v1/notices", headers=hod_headers).status_code == 403
+    assert client.get("/api/v1/sports", headers=hod_headers).status_code == 403
+    assert client.get(
+        f"/api/v1/sports/{sports_a['id']}", headers=hod_headers
+    ).status_code == 403
+    add_hod_account("hod.unassigned@example.com", "Hod-password9!", None)
+    unassigned_hod_headers = login(
+        client, "hod.unassigned@example.com", "Hod-password9!"
+    )
+    assert client.get(
+        "/api/v1/students", headers=unassigned_hod_headers
+    ).status_code == 403
+    assert client.get(
+        "/api/v1/courses", headers=unassigned_hod_headers
+    ).status_code == 403
+    assert client.get(
+        f"/api/v1/courses/{course_unassigned['id']}",
+        headers=unassigned_hod_headers,
+    ).status_code == 403
+    assert client.post(
+        "/api/v1/departments",
+        json={"name": "Unauthorized"},
+        headers=hod_headers,
+    ).status_code == 403
+    assert client.post(
+        "/api/v1/teachers",
+        json={
+            "name": "Unauthorized",
+            "email": "unauthorized@example.com",
+            "department_id": department_a_id,
+        },
+        headers=hod_headers,
+    ).status_code == 403
+    assert client.patch(
+        f"/api/v1/courses/{course_a_id}",
+        json={"department_id": department_b_id},
+        headers=hod_headers,
+    ).status_code == 403
+    assert client.patch(
+        f"/api/v1/attendance/{attendance_a['id']}",
+        json={"status": "absent"},
+        headers=hod_headers,
+    ).status_code == 403
+    assert client.delete(
+        f"/api/v1/students/{student_a_id}", headers=hod_headers
+    ).status_code == 403
+    assert client.post(
+        f"/api/v1/fees/{fee_a['id']}/payments",
+        json={
+            "amount": "10.00",
+            "payment_date": "2026-10-22",
+            "payment_method": "cash",
+            "idempotency_key": "90c4a70d-8739-47f3-a5ee-1d4bd2f4d9a0",
+        },
+        headers=hod_headers,
+    ).status_code == 403
+
+    assert client.get("/api/v1/courses", headers=admin_headers).status_code == 200
+
+
+def test_teacher_course_isolation_and_assigned_academic_writes(
+    client: TestClient,
+) -> None:
+    admin_headers = login(client, "admin@example.com", "correct-horse-battery")
+
+    def admin_create(path: str, body: dict[str, object]) -> dict[str, object]:
+        response = client.post(path, json=body, headers=admin_headers)
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    department = admin_create(
+        "/api/v1/departments", {"name": "Physics"}
+    )
+    department_id = int(department["id"])
+    teacher = admin_create(
+        "/api/v1/teachers",
+        {
+            "name": "Katherine Johnson",
+            "email": "katherine.teacher@example.com",
+            "department_id": department_id,
+        },
+    )
+    teacher_id = int(teacher["id"])
+    assigned_course = admin_create(
+        "/api/v1/courses",
+        {"code": "PH101", "title": "Physics I", "department_id": department_id},
+    )
+    unassigned_course = admin_create(
+        "/api/v1/courses",
+        {"code": "PH102", "title": "Physics II", "department_id": department_id},
+    )
+    assigned_course_id = int(assigned_course["id"])
+    unassigned_course_id = int(unassigned_course["id"])
+    assignment = client.post(
+        f"/api/v1/teachers/{teacher_id}/courses",
+        json={"course_id": assigned_course_id},
+        headers=admin_headers,
+    )
+    assert assignment.status_code == 201
+    other_department = admin_create(
+        "/api/v1/departments", {"name": "Chemistry"}
+    )
+    other_department_course = admin_create(
+        "/api/v1/courses",
+        {
+            "code": "CH101",
+            "title": "Chemistry I",
+            "department_id": int(other_department["id"]),
+        },
+    )
+    cross_department_assignment = client.post(
+        f"/api/v1/teachers/{teacher_id}/courses",
+        json={"course_id": int(other_department_course["id"])},
+        headers=admin_headers,
+    )
+    assert cross_department_assignment.status_code == 422
+    department_unassigned_course = admin_create(
+        "/api/v1/courses",
+        {"code": "PH103", "title": "Physics III"},
+    )
+    unassigned_response = client.post(
+        f"/api/v1/teachers/{teacher_id}/courses",
+        json={"course_id": int(department_unassigned_course["id"])},
+        headers=admin_headers,
+    )
+    assert unassigned_response.status_code == 422
+    assert unassigned_response.json()["detail"] == (
+        "Teacher and course must belong to the same department"
+    )
+    corrected_course = client.patch(
+        f"/api/v1/courses/{department_unassigned_course['id']}",
+        json={"department_id": department_id},
+        headers=admin_headers,
+    )
+    assert corrected_course.status_code == 200
+    corrected_assignment = client.post(
+        f"/api/v1/teachers/{teacher_id}/courses",
+        json={"course_id": int(department_unassigned_course["id"])},
+        headers=admin_headers,
+    )
+    assert corrected_assignment.status_code == 201
+    assert client.get(
+        "/api/v1/teachers/assignments", headers=admin_headers
+    ).json()[0]["course_id"] == assigned_course_id
+    add_teacher_account(
+        "katherine.teacher@example.com", "Teacher-password9!", teacher_id
+    )
+
+    student_in_course = admin_create(
+        "/api/v1/students",
+        {
+            "first_name": "Marie",
+            "last_name": "Curie",
+            "email": "marie@example.com",
+        },
+    )
+    student_other_course = admin_create(
+        "/api/v1/students",
+        {
+            "first_name": "Niels",
+            "last_name": "Bohr",
+            "email": "niels@example.com",
+        },
+    )
+    student_id = int(student_in_course["id"])
+    other_student_id = int(student_other_course["id"])
+    admin_create(
+        "/api/v1/enrollments",
+        {"student_id": student_id, "course_id": assigned_course_id},
+    )
+    admin_create(
+        "/api/v1/enrollments",
+        {"student_id": other_student_id, "course_id": unassigned_course_id},
+    )
+    existing_attendance = admin_create(
+        "/api/v1/attendance",
+        {
+            "student_id": student_id,
+            "course_id": assigned_course_id,
+            "attendance_date": "2026-10-20",
+            "status": "present",
+        },
+    )
+    existing_mark = admin_create(
+        "/api/v1/marks",
+        {
+            "student_id": student_id,
+            "course_id": assigned_course_id,
+            "assessment_name": "Quiz",
+            "score": 8,
+            "max_score": 10,
+        },
+    )
+    other_course_attendance = admin_create(
+        "/api/v1/attendance",
+        {
+            "student_id": other_student_id,
+            "course_id": unassigned_course_id,
+            "attendance_date": "2026-10-20",
+            "status": "absent",
+        },
+    )
+    other_course_mark = admin_create(
+        "/api/v1/marks",
+        {
+            "student_id": other_student_id,
+            "course_id": unassigned_course_id,
+            "assessment_name": "Quiz",
+            "score": 5,
+            "max_score": 10,
+        },
+    )
+
+    login_response = client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": "katherine.teacher@example.com",
+            "password": "Teacher-password9!",
+        },
+    )
+    assert login_response.status_code == 200
+    assert login_response.json()["user"]["role"] == "teacher"
+    assert login_response.json()["user"]["teacher_id"] == teacher_id
+    teacher_headers = {
+        "Authorization": f"Bearer {login_response.json()['access_token']}"
+    }
+
+    assert [
+        row["id"]
+        for row in client.get("/api/v1/courses", headers=teacher_headers).json()
+    ] == [assigned_course_id, int(department_unassigned_course["id"])]
+    assert client.get(
+        f"/api/v1/courses/{unassigned_course_id}", headers=teacher_headers
+    ).status_code == 404
+    assert [row["id"] for row in client.get(
+        "/api/v1/students", headers=teacher_headers
+    ).json()] == [student_id]
+    assert client.get(
+        f"/api/v1/students/{other_student_id}", headers=teacher_headers
+    ).status_code == 404
+    assert [
+        row["course_id"]
+        for row in client.get("/api/v1/enrollments", headers=teacher_headers).json()
+    ] == [assigned_course_id]
+    assert [
+        row["id"]
+        for row in client.get("/api/v1/attendance", headers=teacher_headers).json()
+    ] == [existing_attendance["id"]]
+    assert [
+        row["id"]
+        for row in client.get("/api/v1/marks", headers=teacher_headers).json()
+    ] == [existing_mark["id"]]
+    teacher_results = client.get("/api/v1/results", headers=teacher_headers)
+    assert teacher_results.status_code == 200
+    assert [row["course_id"] for row in teacher_results.json()] == [
+        assigned_course_id
+    ]
+    dashboard = client.get("/api/v1/dashboard/teacher", headers=teacher_headers)
+    assert dashboard.status_code == 200
+    assert dashboard.json()["total_courses"] == 2
+    assert dashboard.json()["total_students"] == 1
+    assert [
+        row["id"]
+        for row in client.get("/api/v1/teachers", headers=teacher_headers).json()
+    ] == [teacher_id]
+    assert client.get(
+        f"/api/v1/teachers/{teacher_id + 1}", headers=teacher_headers
+    ).status_code == 404
+
+    new_attendance = client.post(
+        "/api/v1/attendance",
+        json={
+            "student_id": student_id,
+            "course_id": assigned_course_id,
+            "attendance_date": "2026-10-21",
+            "status": "late",
+        },
+        headers=teacher_headers,
+    )
+    assert new_attendance.status_code == 201
+    updated_attendance = client.patch(
+        f"/api/v1/attendance/{existing_attendance['id']}",
+        json={"status": "late"},
+        headers=teacher_headers,
+    )
+    assert updated_attendance.status_code == 200
+    new_mark = client.post(
+        "/api/v1/marks",
+        json={
+            "student_id": student_id,
+            "course_id": assigned_course_id,
+            "assessment_name": "Midterm",
+            "score": 90,
+            "max_score": 100,
+        },
+        headers=teacher_headers,
+    )
+    assert new_mark.status_code == 201
+    updated_mark = client.patch(
+        f"/api/v1/marks/{existing_mark['id']}",
+        json={"score": 9},
+        headers=teacher_headers,
+    )
+    assert updated_mark.status_code == 200
+
+    assert client.post(
+        "/api/v1/attendance",
+        json={
+            "student_id": other_student_id,
+            "course_id": unassigned_course_id,
+            "attendance_date": "2026-10-21",
+            "status": "present",
+        },
+        headers=teacher_headers,
+    ).status_code == 404
+    assert client.post(
+        "/api/v1/attendance",
+        json={
+            "student_id": other_student_id,
+            "course_id": assigned_course_id,
+            "attendance_date": "2026-10-21",
+            "status": "present",
+        },
+        headers=teacher_headers,
+    ).status_code == 422
+    assert client.post(
+        "/api/v1/marks",
+        json={
+            "student_id": other_student_id,
+            "course_id": unassigned_course_id,
+            "assessment_name": "Midterm",
+            "score": 90,
+            "max_score": 100,
+        },
+        headers=teacher_headers,
+    ).status_code == 404
+    assert client.patch(
+        f"/api/v1/attendance/{other_course_attendance['id']}",
+        json={"status": "present"},
+        headers=teacher_headers,
+    ).status_code == 404
+    assert client.patch(
+        f"/api/v1/marks/{other_course_mark['id']}",
+        json={"score": 6},
+        headers=teacher_headers,
+    ).status_code == 404
+    assert client.delete(
+        f"/api/v1/attendance/{existing_attendance['id']}",
+        headers=teacher_headers,
+    ).status_code == 403
+    assert client.post(
+        "/api/v1/courses",
+        json={"code": "PH103", "title": "Not allowed"},
+        headers=teacher_headers,
+    ).status_code == 403
+    assert client.post(
+        "/api/v1/teachers",
+        json={
+            "name": "Not allowed",
+            "email": "other.teacher@example.com",
+            "department_id": department_id,
+        },
+        headers=teacher_headers,
+    ).status_code == 403
+    assert client.get("/api/v1/fees", headers=teacher_headers).status_code == 403
+    assert client.get("/api/v1/notices", headers=teacher_headers).status_code == 403
+    assert client.get(
+        "/api/v1/dashboard/principal", headers=teacher_headers
+    ).status_code == 403
+
+    assert client.delete(
+        f"/api/v1/teachers/{teacher_id}/courses/{assigned_course_id}",
+        headers=admin_headers,
+    ).status_code == 204
+    assert client.delete(
+        f"/api/v1/teachers/{teacher_id}/courses/{department_unassigned_course['id']}",
+        headers=admin_headers,
+    ).status_code == 204
+    assert client.get(
+        "/api/v1/courses", headers=teacher_headers
+    ).json() == []

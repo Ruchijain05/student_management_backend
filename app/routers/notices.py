@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.enums import UserRole
 from app.models import Notice
 from app.schemas import NoticeCreate, NoticeRead, NoticeUpdate
 from app.security import AdminUser, CurrentUser
@@ -43,6 +44,10 @@ def list_notices(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> list[Notice]:
+    if _.role == UserRole.HOD:
+        raise HTTPException(status_code=403, detail="Campus notices are not available to HOD accounts")
+    if _.role == UserRole.TEACHER:
+        raise HTTPException(status_code=403, detail="Campus notices are not available to teachers")
     statement = (
         select(Notice)
         .order_by(Notice.notice_date.desc(), Notice.id.desc())
@@ -58,6 +63,10 @@ def read_notice(
     db: DatabaseSession,
     _: CurrentUser,
 ) -> Notice:
+    if _.role == UserRole.HOD:
+        raise HTTPException(status_code=403, detail="Campus notices are not available to HOD accounts")
+    if _.role == UserRole.TEACHER:
+        raise HTTPException(status_code=403, detail="Campus notices are not available to teachers")
     return get_notice_or_404(notice_id, db)
 
 
